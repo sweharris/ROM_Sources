@@ -1,0 +1,2 @@
+#!/bin/sh
+cd ~/public_html/sweh.spuddy.org && ./SYNC

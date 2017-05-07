@@ -1,0 +1,110 @@
+Back In The Day (BITD) I had a Solidisk 2M128 board.  This was quite
+a powerful board and added B+/Master type memory to a model B.  It also
+added 4 more ROM slots.
+
+RAM was configured for banks 4,5,6,7 and banks C,D,E,F.
+
+Banks 4,5,6,7 could also be configured to behave like SRDATA
+Banks C,D could also be configured to behave like a print buffer
+Banks E,F could be configured for shadow mode
+
+Some of this was hard coded into the board (C,D,E,F) some of it was
+basically software (the Solidisk Manager ROM).  Unfortunately the
+Solidisk ROM had a few bugs and was a little limited, so I wrote
+my own.  I stole some of the original code, added stuff of my own,
+fixed bugs and enhanced things.  
+
+However I was pretty bad at _documenting_ the source.  Ugh.  And it
+seems the assembler I used was limited to 6 character label names, which
+made it a little hard to follow.
+
+Roll forward to 2013 and I now have a second Beeb with a Steve Picton
+SWR board.  This doesn't do shadow or buffers, and doesn't have RAM
+banks in the right place.  But the core code was still useful, and I
+did some binary editing of the ROM to allow it to work.  Eventually
+I converted the source to beebasm format, attempted to document it.
+I also tried to remove the components that wouldn't work except with
+STL components, via IFDEF sections.  And added ability to correctly
+detect FLASH ROM as ROM, rather than RAM.
+
+So the following code got stripped out (via options)
+  *TV handling
+  RAMDISK
+  SRDATA routines
+  Shadow RAM
+  Print buffers
+The commands
+  *BUFFER
+  *NOBUFFER
+  *NOWORD
+  *PURGE
+  *RAMDRIVE
+  *RESTART
+  *RLOAD
+  *RMDL
+  *RMDS
+  *RSAVE
+  *SHADOW
+  *XSHADOW 
+  *SHPLUS
+  *SRDATA
+  *SRROM
+  *YESWORD
+OSWORD &78/&79/&7B (Soldisk RAMdisk) removed
+
+*SRLOAD/*SRSAVE modified
+OSWORD &42/&43 should also be fixed
+
+The attached tar file has the following files:
+  MANAGER       - My ROM assembled for STL 2M128
+  MANUAL1       - The original user guide in WORD format
+  MENU          - Modified Solidisk MENU program
+  README        - This README
+  SOLIDISK.ROM  - The original Solidisk Manager ROM
+  manager.src   - the source code for my ROM, in BeebASM format
+  manual.txt    - the original user guide, formatted
+
+
+==================
+
+Update 2013/06/05
+
+UPURSFS code has now been installed.  For details of what UPURSFS is,
+please see
+    http://sweh.spuddy.org/Beeb/UPURSFS/
+It is enabled with the HOSTFS define.  Two new source code files
+have been included:
+  6502src.txt
+  upursfs.txt
+These come directly from the UPURSFS code, with one line change:
+  sed 's/SWEH_EXTENSION = TRUE/SWEH_EXTENSION = 200/'
+
+====================
+
+Update 2013/08/24
+
+*TUBEON and *TUBEOFF have been added.
+Basically, if *TUBEOFF is entered then a ?&27A=0 is done at BREAK time
+which disables the TUBE.  Mostly, anyway!
+
+====================
+
+Update 2013/10/20
+
+In the Makefile if compiling UPURS then change the USER_PORT base value.
+  sed -e 's/SWEH_EXTENSION = TRUE/SWEH_EXTENSION = 200/' -e 's/USER_PORT = .*/USER_PORT = \&FC11/'
+
+This is mostly for me 'cos I have UPURS on a 2nd user port
+  http://sweh.spuddy.org/Beeb/2nd_User_Port/
+
+====================
+
+Update 2013/11/05
+
+Split out the config variables into separate files
+  solidisk.src - suitable for STL 2M128 Board (UPURS,SOLIDISK)
+  ctory.src - suitable for CTORY RAM/ROM board.  Also BBC Master with OS1.20
+    (UPURS)
+  beebem.src - what I use in BeebEm (HOSTFS)
+
+Make hostfs "filesystem select" key be U 'cos RAM MANAGER already uses TAB

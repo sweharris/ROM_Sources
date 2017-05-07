@@ -1,0 +1,7 @@
+Option    | Solidisk | Ctory | Master | BeebEm | Generic
+----------+----------+-------+--------+--------+--------
+UPURSFS   |   TRUE   |  TRUE |  TRUE  | FALSE  |  FALSE
+HOSTFS    |  FALSE   | FALSE | FALSE  |  TRUE  |  FALSE
+SOLIDISK  |   TRUE   | FALSE | FALSE  | FALSE  |  FALSE
+SRMENU    |  FALSE   | FALSE | FALSE  | FALSE  |   TRUE
+DO_TV     |  FALSE   | FALSE | FALSE  | FALSE  |  FALSE

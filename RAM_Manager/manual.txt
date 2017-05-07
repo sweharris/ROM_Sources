@@ -1,0 +1,351 @@
+
+
+ 2Mhz 128k Manager ROM  Version 2
+
+
+The manager ROM supplied with  the  Solidisk  2Mhz  128k board is, at
+best, feeble; e.g the SHADOW commands don't work properly (data can be lost,
+and changes take effect immediately, instead of at MODE change).  Because of
+this, I wrote version 2, which has 39 * commands, and emualtes most Osword
+and Osbyte calls needed to support Sideways/Shadow RAM.
+
+The commands are now described by subject.
+Buffers
+-------
+Relevant commands: BUFFER
+                   NOBUFFER
+                   PURGE
+                   RESTART
+
+Buffer takes a buffer number from 0 to 7 (any other value is taken  as 3 -
+printer) and sets up a 24k buffer.  If the buffer already exists, then the
+data contained is transfered to  the  new  buffer.   Hence if you set up a
+printer  buffer (with the printer off), send some data  to  it,  and  then
+enter *BUFFER  0,  the  data will be sent back to the keyboard.  Note that
+the very first character will be lost, since the BBC OS takes that even if
+the printer is off.  This  is  similar  to the *BUFFER/*STREAM commands of
+the original manager, but with the bugs taken out!
+Purge empties the buffer, while nobuffer kills it - note all data is lost.
+Finally, pressing BREAK will pause output from the  buffer - if it is used
+as  a  printer buffer, then *RESTART will recommence printing   (the  same
+thing can be done in BASIC by VDU 2,1,0,3 ).
+
+Shadow Memory
+-------------
+Relevant commands: SHADOW
+                   XSHADOW
+                   SHPLUS
+                   YESWORD
+                   NOWORD
+                   SRSTATUS
+
+This emulates the  Shadow  command  on  the  BBC  B+   (note  that  Master
+emulation  is  impossible  due  to  the  hardware configuration of the BBC
+Mother Board ).  To do this involves intercepting 4 sets of vectors ;
+   1) OSWRCH   2) OSRDCH   3) OSBYTE   4) OSWORD
+Since provision is only made for 3  sets of new vectors, some extra memory
+was also used.  This should be transparent since  it uses unused workspace
+in page 3 (see Memory Maps later). Also some  ROMS  (eg  EXMON)  are badly
+written  when  it  comes to OSWORD calls, and may cause problems.  To this
+end a *NOWORD command  is  added  so  that OSWORD is not trapped, allowing
+this to work normally.  The OSWORD trap is  only for call 9 (POINT), so if
+this  is not needed all should be well.  *YESWORD  will  re-enable  OSWORD
+trapping.  Alternatively (if you are already in EXMON), OSBYTE 6F (*FX111)
+will perform  the  same  :  *FX111,1  will  perform *NOWORD, *FX111,0 will
+perform *YESWORD (OB 6F,01,00 or OB 6F,00,00 in Exmon).
+*SHADOW or *SHADOW 0 will force SHADOW mode on next MODE change,
+*SHADOW 1 will cancel shadow on mode change.
+*XSHADOW is as *SHADOW but also performs a *NOWORD
+*SHPLUS will enable a mode greater than 127  (i.e  128  to 135) to go into
+shadow, while 0 to 7 will be normal.   Please note that entering or leaving
+SHADOW modes will cause a slight delay while data is copied  to  and  from
+the shadow areas.
+*SRSTATUS will tell what states shadow,shplus and vector trapping is in.
+
+
+
+
+                                 Page -1-
+
+
+
+
+                     2Mhz 128k Manager ROM  Version 2
+
+
+Ram Management
+--------------
+Relevant commands: RAMCLEAR
+                   RLOAD
+                   RSAVE
+                   SRLOAD
+                   SRSAVE
+                   SRMENU
+                   SRREAD
+                   SRWRITE
+                   SRDATA
+                   SRROM
+                   SRWIPE
+                   TESTRAM
+
+*RAMCLEAR will fill the specified bank with zero's.
+*SRLOAD, *SRSAVE, *SRREAD, *SRWRITE act  as their MASTER equivalents  (see
+Master Reference guides, or The Master  Operating  System  -  DABS  press)
+*RLOAD,  *RSAVE  will  load/save  ROM  images  directly  into  SWR without
+corrupting workspace on Solidisk DFS's.  This works because a  feature  of
+the  Solidisk ROMS is that, for a LOAD address of XYYYY, the value of X is
+entered into  the  ROM select register - for SWR this means it is selected
+for writing, hence enabling *LOADs into RAM direct.
+*SRDATA will set up  pseudo  RAM  locations  for  SRREAD, SRWRITE, SRLOAD,
+SRSAVE  -  up  to  64k.   Unlike  the MASTER, these  do  not  have  to  be
+contiguous. *SRROM resets this back to normal use.
+*SRWIPE is used to clear a ROM  image  from  RAM;  it puts a zero into the
+copyright offset pointer, making the ROM unreadable to the BBC OS.
+*SRMENU  enters  BASIC  and runs a version of Solidisk's menu program.  It
+has been altered so  that  only  programs in directory 'R' are read, using
+legal  calls  so  that multiple catalogues and  drives  0  and  2  can  be
+accessed. *SRMENU 1 will not sort the items.
+*TESTRAM will report the number of SWR banks (should be 0 or 8).
+
+Ramdrive
+--------
+Relevant commands: RAMDRIVE
+                   RMDL
+                   RMDS
+
+The Solidisk DFS and  ADFS  (versions 2.1 upwards) have hooks in to enable
+other ROMS to add code. This  facility  has  been  used  in  the  Solidisk
+Manager  as  well  as here.  However here, a ramdisk of either 64k or 100k
+can be set up as opposed to just 64k by Solidisk.
+*RMDL will set upa  100k  ramdisk.   It  needs to know whether DFS or ADFS
+(D/A) and what drive (0-3), hence *RMDL D 0 will set up a 100k DFS ramdisk
+as drive 0.  *RMDS is the same but for 64k.
+If you do not pass any parameter, it  will  force  the  ramdrive into that
+size without affecting the contents (although the disk size as seen by the
+DFS/ADFS  will  still  be  the  old  value).   This  can be used to repair
+corrupted workspace - see later.
+*RAMDRIVE can be used to change the drive number, or to reset the ramdrive
+after a Conrol Break without losing any data.   If  you  do  not  pass any
+parameter, then it turns off the ramdisk.
+
+
+
+
+
+
+
+
+                                 Page -2-
+
+
+
+
+                     2Mhz 128k Manager ROM  Version 2
+
+
+ROM management
+--------------
+Relevant commands: BYPASS
+                   ROUTE
+                   FILECOM
+                   FILESYS
+                   NLE
+                   NOROM
+                   YESROM
+                   PROMS
+                   UNPLUG
+                   RINSERT
+                   STANDARD
+
+*BYPASS  and  *ROUTE  both  send a command just to the specified ROM, thus
+helping to prevent clashes.  *FILECOM  does similar but passes the command
+to the filing system vector - this means that just filing system dependent
+commands are used.  *FILESYS tells you what your filing system is.
+*NLE enters an OSCLI type environment where all commands are executed as *
+commands.  *PROMS lists the ROM images/RAM usage and the state they are in
+(i.e unplugged).  *NOROM will turn a ROM off until BREAK is pressed.
+*YESROM will turn it on again.   *UNPLUG  will  kill a ROM until RINSERTed
+again (note I used RINSERT rather than INSERT so  that  *I.  can  still be
+used as *INFO).
+*STANDARD  turns  off  EVERY  ROM  except BASIC and performs a hard reset.
+This should make your machine look  like an unexpanded machine to any tape
+based games that are very fussy  (or  if you have a younger child who just
+uses tape).
+
+Break
+-----
+Relevant commands: HARDBREAK
+                   RESET
+
+*HARDBREAK  performs  a ?&FE4E=127 followed  by  CALL  !&FFFC,  efectively
+telling ROMS that the machine has been turned on.
+*RESET  first inserts all unplugged  ROMS,  clears  SHADOW  RAM,  Ramdisk,
+buffers and then performs a hardbreak.
+
+Also various new key combinations work on pressing BREAK:
+  M-BREAK calls up the SRMENU
+TAB-BREAK will clear shadow RAM, buffers and insert all ROMS
+  T-BREAK will  clear  shadow  RAM, and try to kill ROM images in sideways
+          RAM, as well as try  to  clear  all  other  options  set  by the
+          manager ROM.
+
+These  last  two have been set because some programs corrupt the workspace
+used by the  manager,  and  pressing  BREAK  will cause various effects to
+happen (e.g. In ELITE your score is stored where the UNPLUG table is).
+
+Another  feature  of this ROM is that, no matter what the ROM priority is,
+BASIC will always  be  entered  at  Control  BREAK   (unless  unplugged or
+non-existent  in  which  case the No Language Environment -NLE- is entered
+instead.  If both BASIC  and  MANAGER  are  unplugged  then the manager is
+temporarily activated by *YESROM and NLE is entered).
+
+
+
+
+
+
+
+                                 Page -3-
+
+
+
+
+                     2Mhz 128k Manager ROM  Version 2
+
+
+OSBYTE/OSWORD calls
+-------------------
+New OSBYTE calls added are:
+  44  (68)  Test for SWR
+  45  (69)  Test for Pseudo adressed RAM
+  A5 (165)  Read Output Cursor position
+  6C (108)  Allow direct poking to shadow memory
+  6F (111)  Affect state of *YESWORD/*NOWORD
+  70 (112)  Allow VDU access to shadow memory
+  72 (114)  *SHADOW
+  EF (239)  Read OB 72
+                   (note that on the MASTER, this is read/write)
+
+Also, while vectors are being claimed (in SHADOW/SHPLUS mode)
+  81 (129)  Inkey
+  84 (132)  Read HIMEM
+  85 (133)  Read HIMEM for MODE x
+  87 (135)  Get character from (x,y)
+have all been updated to work in SHADOW modes.
+
+New OSWORD calls added are:
+  42 ( 66)  Osword equivalent to *SRREAD / *SRWRITE
+  43 ( 67)  Osowrd equivalent to *SRLOAD / *SRSAVE
+
+Also (if in *YESWORD)
+   9 (  9)  POINT has been updated.
+
+Memory MAPS
+-----------
+39F,3A0 - table for ROM unplug
+3A1,3A2 - previous OSBYTE address
+3A3     - Ramdisk present or not  (3 => present)
+3A4,3A5 - Extended OSBYE address
+          ROM number stored in &DF0,X
+3A6     - Status byte:
+                   b7 : Set -> Shadow VDU call
+                   b6 : Set -> *SHADOW 0
+                   b5 : Set -> *SHPLUS 0
+                   b4 : Set -> Mode change imminent
+                   b3 : Set -> In a shadow mode.
+                   b2 : Set -> Buffer active
+                   b1 : Set -> Large Ramdisk
+                   b0 : Set -> Shadow vectors claimed.
+
+37F     - OSWORD status/SRDATA status
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                 Page -4-
+
+
+
+
+                     2Mhz 128k Manager ROM  Version 2
+
+
+Because this memory is not used by OS1.20 or  above,  some  games or other
+ROMS  use  this,  and  so  cause this manager ROM to set up  in  different
+configurations.  Various methods have been given to correct this, but they
+mainly involve clearing the status byte (TAB -BREAK) and reconfiguring.
+Also, some games (such as Cholo)  send  service  call 1 to the roms. This
+causes this manager ROM to enter mode 7 and  print  out  a  message - thus
+destroying the game.  *UNPLUGging the Manager will prevent that.
+
+The  SHADOW  should  be compatible will all properly written software that
+does not intercept vectors; even GXR works correctly!
+
+A word of warning  - some games (e.g repton3) use OSBYTE 44 (test for SWR)
+to determine whether they are  on a MASTER or not.  Since this now returns
+the same value as the master  version,  it  will  try to load the enhanced
+version of the game. If you have an E00 DFS,  this might work (it does for
+Reptom  3 - no shadow mode), otherwise close the write protect  switch  to
+make OSBYTE 44 return 0 (no SWR).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                 Page -5-
+
+
+

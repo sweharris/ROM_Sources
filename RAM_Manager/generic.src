@@ -1,0 +1,84 @@
+\ Solidisk 2Mhz 128 board can be configured in multiple ways.  There
+\ are some assumptions built in
+\ banks 4,5,6,7 can be made SRDATA/SRROM
+\ banks C,D can be used for buffers
+\ banks E,F can be used for shadow
+\ If solidisk DDFS is present then we can also use memory for
+\   RAMdisk; a small ramdisk uses 4,5,6,7 (64K).  A large RAMDisk uses
+\   4,5,6,7,C,D,E (100K)
+
+\ Because of the model B video circuitry, emulating "shadow" is a slightly
+\ messy affair.  Typically we overlay Solidisk memory onto the main memory
+\ map, as seen by the CPU.  And if we want to write to video RAM then
+\ we page that in, call the original routine, then page it back out
+\ again.  This means that entering or exiting shadow mode requires
+\ copying a chunk of data between main memory and solidisk shadow
+\ memory.
+
+\ Core code for dealing with buffers, ramdisk, shadow were taken from
+\ Solidisk's original ROM.  In some cases I've cleaned up or fixed bugs
+\ or enhanced, but much of the original code for those functions is
+\ from Solidisk.
+
+\ Copyright (c) 1988 Stephen Harris
+\ Converted to BeebASM format 2013
+\ Original Solidisk code (c) Solidisk 1987
+
+
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+\\
+\\                        TUNABLE VALUES
+\\
+\\ SOLIDISK - Assemble full ROM for STL 2M128 board
+\\  DO_TV - if you're using a TV that needs a *TV command...
+\\    DO_TV_X  - these are the values
+\\    DO_TV_Y
+\\  STLSHADOW - Solidisk SHADOW mode
+\\  RAMDISK - If you have a STL DDFS and banks 4/5/6/7,
+\\            emulate a RAMdisk
+\\  SRDATA - If you have banks 4/5/6/7 then emulate SRDATA
+\\  UPURSFS - Include UPURSFS into the ROM
+\\  HOSTFS - Include HOSTFS into the ROM
+\\  SRMENU - Include M-BREAK and *SRMENU code
+\\
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+\\
+\\ Note: SOLIDISK+UPURSFS+SRMENU == too big!
+\\
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+
+\ Do we want to include UPURSFS or HOSTFS?
+UPURSFS = FALSE
+HOSTFS = FALSE
+
+\ If we set this to false then we only use a subset of functionality
+SOLIDISK = FALSE
+
+\ M-BREAK and *SRMENU
+SRMENU = TRUE
+
+\ This is a boot time kludge, helpful for BBCs talking to TVs where a
+\ *TV is needed
+DO_TV	= FALSE
+IF DO_TV
+	DO_TV_X	= 255
+	DO_TV_Y	= 1
+ENDIF
+
+IF SOLIDISK
+	RAMDISK		= TRUE
+	SRDATA		= TRUE
+	STLSHADOW	= TRUE
+ELSE
+	RAMDISK		= FALSE
+	SRDATA		= FALSE
+	STLSHADOW	= FALSE
+ENDIF
+
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+\\
+\\                      END TUNABLE VALUES
+\\
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+
+include "manager.src"

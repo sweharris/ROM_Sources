@@ -1,0 +1,15 @@
+#!/bin/sh
+
+echo "<html>
+<head><title>Solidisk 2M128 RAM Manager</title></head>
+<body>
+<h1><center>Solidisk 2M128 RAM Manager</center></h1>
+<a href=2m128.tar>A tar file with the files</a>
+<br>
+<a href=manual.txt>The original formatted manual</a>
+<br>
+Last modified: $(date)
+<pre>
+"
+sed 's/&/\&amp;/g' $@
+echo "</pre></body></html>"

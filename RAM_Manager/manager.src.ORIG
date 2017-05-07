@@ -1,0 +1,4967 @@
+\ Solidisk 2Mhz 128 board can be configured in multiple ways.  There
+\ are some assumptions built in
+\ banks 4,5,6,7 can be made SRDATA/SRROM
+\ banks C,D can be used for buffers
+\ banks E,F can be used for shadow
+\ If solidisk DDFS is present then we can also use memory for
+\   RAMdisk; a small ramdisk uses 4,5,6,7 (64K).  A large RAMDisk uses
+\   4,5,6,7,C,D,E (100K)
+
+\ Because of the model B video circuitry, emulating "shadow" is a slightly
+\ messy affair.  Typically we overlay Solidisk memory onto the main memory
+\ map, as seen by the CPU.  And if we want to write to video RAM then
+\ we page that in, call the original routine, then page it back out
+\ again.  This means that entering or exiting shadow mode requires
+\ copying a chunk of data between main memory and solidisk shadow
+\ memory.
+
+\ Core code for dealing with buffers, ramdisk, shadow were taken from
+\ Solidisk's original ROM.  In some cases I've cleaned up or fixed bugs
+\ or enhanced, but much of the original code for those functions is
+\ from Solidisk.
+
+\ Copyright (c) 1988 Stephen Harris
+\ Converted to BeebASM format 2013
+\ Original Solidisk code (c) Solidisk 1987
+
+
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+\\
+\\                        TUNABLE VALUES
+\\
+\\ SOLIDISK - Assemble full ROM for STL 2M128 board
+\\  DO_TV - if you're using a TV that needs a *TV command...
+\\    DO_TV_X  - these are the values
+\\    DO_TV_Y
+\\  STLSHADOW - Solidisk SHADOW mode
+\\  RAMDISK - If you have a STL DDFS and banks 4/5/6/7,
+\\            emulate a RAMdisk
+\\  SRDATA - If you have banks 4/5/6/7 then emulate SRDATA
+\\  UPURSFS - Include UPURSFS into the ROM
+\\  HOSTFS - Include HOSTFS into the ROM
+\\  SRMENU - Include M-BREAK and *SRMENU code
+\\
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+\\
+\\ Note: SOLIDISK+UPURSFS+SRMENU == too big!
+\\
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+
+\ Do we want to include UPURSFS or HOSTFS?
+UPURSFS = TRUE
+HOSTFS = FALSE
+
+\ If we set this to false then we only use a subset of functionality
+SOLIDISK = TRUE
+
+\ M-BREAK and *SRMENU
+SRMENU = FALSE
+
+\ This is a boot time kludge, helpful for BBCs talking to TVs where a
+\ *TV is needed
+DO_TV	= FALSE
+IF DO_TV
+	DO_TV_X	= 255
+	DO_TV_Y	= 1
+ENDIF
+
+IF SOLIDISK
+	RAMDISK		= TRUE
+	SRDATA		= TRUE
+	STLSHADOW	= TRUE
+ELSE
+	RAMDISK		= FALSE
+	SRDATA		= FALSE
+	STLSHADOW	= FALSE
+ENDIF
+
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+\\
+\\                      END TUNABLE VALUES
+\\
+\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+
+
+\ These macros may seem silly, but it makes the code easy to read
+
+MACRO	clr_bits X
+	AND #(NOT(X) AND 255)
+ENDMACRO
+
+MACRO   set_bits X
+	ORA #X
+ENDMACRO
+
+MACRO	test_bits X
+	AND #X
+ENDMACRO
+
+\ Memory locations we use
+
+srdata_status	= &37F  \ SRROM/SRDATA status
+unplug_table	= &39F	\ + 3A0 - what ROMS should be unpluged
+OldByteV	= &3A1	\ + 3A2 - Old OSBYTE vector
+ramdisk_present	= &3A3	\ 3 => present
+extended_osbyte	= &3A4  \ + 3A5 - Old extended OSBYTE vector (we store ROM
+			\ in our PrivateWorkspace variable DF0+ROM
+status_byte	= &3A6	\ Status byte (see below for bitmap)
+
+\ Flags for srdata_status
+\  bits 0->3 determine if banks 4,5,6,7 are DATA or ROM ( 0 => SRDATA)
+
+\ We re-use our Private Memory location as another useful status
+\ 'cos we don't need memory of our own (&DF0 + ROM)
+\ High bit means we want to capture OSWORD in shadow mode
+\ Low 4 bits are the ROM that had the old extended OSWORD vector
+capture_osword		= &80
+status_tube_off         = &40
+
+\ Status flags for status_byte
+status_vdu		= &80	\ b7 : Set -> Shadow VDU call
+status_shadow		= &40	\ b6 : Set -> *SHADOW 0
+status_shplus		= &20	\ b5 : Set -> *SHPLUS 0
+status_mode		= &10	\ b4 : Set -> Mode change imminent
+status_inshadow		= &8	\ b3 : Set -> In a shadow mode.
+status_buffer		= &4	\ b2 : Set -> Buffer active
+status_large_ramdisk	= &2	\ b1 : Set -> Large Ramdisk
+status_vectors		= &1	\ b0 : Set -> Shadow vectors claimed.
+
+vdu_status_byte		= &D0	\ OSBYTE &75 value is stored here
+vdu_cursor_editing	= &40	\ This is a standard value
+vdu_status_shadow 	= &10	\ We add this new one, for shadow
+
+
+\ Standard memory locations
+OSbyteA		= &EF	\ Also OSWORD byte A
+OSbyteX		= &F0	\ Also (XY) vector for OSWORD
+OSbyteY		= &F1
+CLI_NAME_VEC	= &F2	\ and &F3.  We can also re-use for temp work
+RAM_ROMSel	= &F4
+ROMptr		= &F6	\ + &F7 Location pointing into paged ROM (service D/E)
+BRKptr		= &FD 	\ and &FE
+EscFlag		= &FF
+
+\ temporary locations we may use.  Sometimes we "abuse" standard OS locations
+text		= &DE	\ and &DF
+temp1		= &F2	\ + &F2 - aka CLI_NAME_VEC
+temp2		= &F5	\ PHROM number
+temp3		= &F6	\ + &F7 - also ROMptr
+temp4		= &F7	\ sometimes we don't use it in conjuction
+temp5		= &F8	\ + &F9
+
+\ We're really abusing the stack memory from &100-> &157.  *gibber*
+SWR_write	= &120	\ -> &13F
+
+ROMTypeTable	= &02A1
+ROMPrivWksp 	= &0DF0
+
+vdu_input_x	= &364
+vdu_input_y	= &365
+
+os_tube_location = &27A	\ write a zero here to disable the tube
+
+ROMsel		= &FE30
+
+\ Soldisk DDFS uses this to determine if RAMdisk is present
+IF RAMDISK
+stl_ramdisk	= &10FF
+buffer_type	= &888	\ What buffer are we intercepting
+ENDIF
+
+\ Solidisk adds ACCCON type variable to select how we access shadow memory
+ACCCON		= &FE34
+ACCCON_main	= 0
+ACCCON_shadow	= 130
+ACCCON_buffer	= 128
+
+\ General vectors; a complete(?) list just in case
+USERV 	= &0200
+BRKV  	= &0202
+IRQ1V 	= &0204
+IRQ2V 	= &0206
+CLIV  	= &0208
+BYTEV 	= &020A
+WORDV 	= &020C
+WRCHV 	= &020E
+RDCHV 	= &0210
+FILEV 	= &0212
+ARGSV 	= &0214
+BGetV 	= &0216
+BPutV 	= &0218
+GBPBV 	= &021A
+FINDV 	= &021C
+FSCV  	= &021E
+EVNTV	= &0220
+UPTV  	= &0222
+NETV  	= &0224
+VDUV  	= &0226
+KEYV  	= &0228
+INSV  	= &022A
+REMV  	= &022C
+CNPV  	= &022E
+IND1V 	= &0230
+IND2V 	= &0232
+IND3V 	= &0234
+
+\ OS calls
+OSWRSC	= &FFB3
+OSRDSC	= &FFB9
+OSEVEN	= &FFBF
+GSINIT	= &FFC2
+GSREAD	= &FFC5
+NVRDCH	= &FFC8
+NVWRCH	= &FFCB
+OSFIND	= &FFCE
+OSGBPB	= &FFD1
+OSBPUT	= &FFD4
+OSBGET	= &FFD7
+OSARGS	= &FFDA
+OSFILE	= &FFDD
+OSRDCH	= &FFE0
+OSASCI	= &FFE3
+OSNEWL	= &FFE7
+OSWRCH	= &FFEE
+OSWORD	= &FFF1
+OSBYTE	= &FFF4
+OSCLI 	= &FFF7
+OSReset	= &FFFC
+
+	ORG &8000
+	GUARD &C000
+
+.start_code
+
+	JMP rlang
+	JMP rserv
+	EQUB &C2		\ We are a language - kinda!
+	EQUB LO(copy)
+	EQUB 2
+.title	EQUS "RAM Manager"
+.copy	BRK
+	EQUS "(C) 1988 S.Harris"
+	BRK
+
+\ We should only get here if we can't find BASIC anywhere.
+\ Basically, just print a "*" prompt, read a string into &700
+\ and then call OSCLI on it
+
+.rlang	JSR pflmss
+	EQUS "No language environment"
+	BRK
+	LDA #LO(rlbrk)
+	STA BRKV
+	LDA #HI(rlbrk)
+	STA BRKV+1
+.rlangl	JSR OSNEWL
+	LDA #'*'
+	JSR OSWRCH
+	LDY #0		\ copy rlangd to &70; rlangd is the structure
+.rlngl2	LDA rlangd,Y	\ needed for OSWORD 0; we copy to ensure it's
+	STA &70,Y	\ not called from ROM, but from RAM.
+	INY
+	CPY #5
+	BNE rlngl2
+	LDX #&70
+	LDA #0
+	TAY
+	JSR OSWORD	\ Read command line input
+	BCS rlnger	\ Was ESCAPE pressed?
+	LDX #0
+	LDY #7
+	JSR OSCLI	\ Call OSCLI on what the user entered
+	JMP rlangl
+.rlnger	JSR pflmss
+	EQUB 13
+	EQUS "Escape"
+	BRK
+.rlnge2	LDA #&7E	\ Clear escape flag
+	JSR OSBYTE
+	JMP rlangl
+.rlbrk	JSR OSNEWL
+	LDY #0
+	INY
+	LDA (BRKptr),Y
+	JSR OSASCI
+	CMP #0
+	BNE rlbrk+5
+	JMP rlnge2
+
+.rlangd	EQUW &700	\ Data structure for OSWORD 0; this gets
+	EQUB 200	\ copied into RAM
+	EQUB 32
+	EQUB 255
+
+\ Service entry point
+.rserv
+IF	HOSTFS OR UPURSFS
+	\ Ensure this manager ROM is called first, then call HOSTFS
+	\ routines
+	PHA
+	JSR	ram_manager_service
+	CMP	#0
+	BNE	call_hostfs
+	PLA
+	PHA
+	\ Pass on *HELP always
+	CMP	#9
+	BEQ	call_hostfs
+	PLA
+	LDA	#0
+	RTS
+
+.call_hostfs
+	PLA
+	JMP	Service
+
+.ram_manager_service
+ENDIF
+	CMP #1	
+	BEQ remrom
+
+	CMP #3
+	BEQ boot
+
+	CMP #4
+	BNE *+5
+	JMP newcom
+
+	CMP #7
+	BNE *+5
+	JMP romosb
+
+	CMP #8
+	BNE *+5
+	JMP romwrd
+
+	CMP #9
+	BNE *+5
+	JMP help
+
+	RTS
+
+.boot	TYA            \ Service 3 Display this ROM title in the header
+	PHA
+	LDY #&FF
+.btlp	INY
+	LDA title,Y
+	JSR OSASCI
+	CMP #0
+	BNE btlp
+	JSR OSNEWL
+	JSR OSNEWL
+	PLA
+	TAY
+	LDA #3
+	RTS
+
+.remrom	TYA		\ Service call 1 - called at boot time
+	PHA
+	LDA status_byte
+IF NOT(STLSHADOW)
+	\ Let's just ensure no shadow/ramdisk/buffer functions are on
+	\ We do this as soon as we can, just to stop possible corruption
+	clr_bits(status_vdu+status_shadow+status_shplus+status_mode+status_inshadow+status_vectors)
+ENDIF
+IF NOT(SOLIDISK)
+	clr_bits(status_buffer)
+ENDIF
+IF NOT(RAMDISK)
+	clr_bits(status_large_ramdisk)
+ENDIF
+	STA status_byte
+IF NOT(RAMDISK)
+	LDA #0
+	STA ramdisk_present
+ENDIF
+IF NOT(SRDATA)
+	\ If we're not processing SRDATA then set ROM for each bank
+	\ just in case memory got corrupted
+	LDA #&FF
+	STA srdata_status
+ENDIF
+	LDA #&FD	\ What type of BREAK was this?
+	LDX #0          \ (0=soft, 1=powerup, 2=control-break)
+	LDY #&FF
+	JSR OSBYTE
+	TXA
+	PHA
+	BEQ btovr0	\ Skip all this if soft break
+	CMP #1
+	BNE nclrsh
+	\ On a powerup, clean restart.
+	LDA #0		\ Clear all flags (disable features)
+	STA status_byte
+IF STLSHADOW
+	STA ACCCON
+ENDIF
+IF SRDATA
+	LDA #&FF
+	STA srdata_status	\ All banks for ROM images
+ENDIF
+
+	LDX RAM_ROMSel
+	LDA ROMPrivWksp,X
+	set_bits(capture_osword)\ By default, shadow should steal vectors
+	clr_bits(status_tube_off) \ Don't disable the tube if present
+	STA ROMPrivWksp,X
+
+	TAY
+	LDX #1		\ NEW = (OLD AND Y) EOR X
+	LDA #&EF
+	JSR OSBYTE	\ .. I don't know why we do this
+
+.nclrsh
+	\ We get here on control-BREAK or power-up
+IF DO_TV
+	LDA #144
+	LDX #DO_TV_X
+	LDY #DO_TV_Y
+	JSR OSBYTE	\ *TV - probably not needed, these days!
+ENDIF
+
+IF	RAMDISK
+	LDA #0
+	STA ramdisk_present	\ disable ramdisk on ctrl+break
+				\ it can be re-enabled with *RAMDISK
+ENDIF
+
+.btovr0
+	\ We get here for all forms of BREAK
+
+	\ Should we attempt to disable the tube?
+        LDX RAM_ROMSel
+        LDA ROMPrivWksp,X
+        test_bits(status_tube_off)
+        BEQ keep_tube
+	LDA #0
+	STA os_tube_location
+.keep_tube
+
+IF STLSHADOW
+	LDA status_byte
+	clr_bits(status_vdu + status_vectors)
+	STA status_byte		\ We don't have vectors at this point
+
+	test_bits(status_shadow + status_shplus + status_inshadow)
+	BEQ btnosh		\ If not skip
+
+	CMP #status_inshadow
+	BNE btyesh
+
+	LDA status_byte
+	test_bits(status_buffer + status_large_ramdisk)
+	STA status_byte
+
+	LDA #&FF	\ *FX 255 0 255 - read keyboard links
+	TAY
+	LDX #0
+	JSR OSBYTE
+
+	TXA
+	AND #7
+	STA &AE 	\ Save MODE
+
+	JSR rstshm
+	JMP btnosh
+
+.btyesh	JSR shadvs	\ We're in shadow mode
+.btnosh	LDA status_byte
+	AND #status_buffer
+	BEQ *+5
+	JSR printv	\ Set up vectors
+	LDA #22
+	JSR OSWRCH
+	LDA #255
+	TAY
+	LDX #0
+	JSR OSBYTE
+	TXA
+	AND #7
+	JSR OSWRCH	\ Do a VDU 22,<default mode> which will
+			\ trigger shadow memory copy as needed
+ENDIF
+	LDA #&D7
+	LDY #&7F
+	LDX #0
+	JSR OSBYTE	\ Turn off system boot message; we're
+			\ doing our own one
+
+	LDA #&7A	\ Any keys pressed during BREAK?
+	JSR OSBYTE
+	TXA
+IF	SRMENU
+	CMP #&65	\ M-BREAK
+	BNE ntbt_m
+	LDA #&78
+	JSR OSBYTE
+	LDA #15
+	JSR OSBYTE	\ Flush buffers
+	LDY #0
+	STY temp1
+.btm_l	LDY temp1	\ Insert *SRMENU into keyboard buffer
+	LDA btm_k,Y
+	PHA
+	TAY
+	LDA #138
+	LDX #0
+	JSR OSBYTE
+	INC temp1
+	PLA
+	CMP #13
+	BNE btm_l
+	JMP btovrf
+
+.btm_k	EQUS "*SRMENU",13
+ENDIF
+
+.ntbt_m	CMP #&60	\ TAB break
+	BEQ *+5
+	JMP btovr
+	LDA #0
+	STA unplug_table
+	STA unplug_table+1	\ Re-insert all ROMS
+	LDA status_byte
+	clr_bits(status_shadow+status_shplus+status_buffer)
+	STA status_byte
+        LDX RAM_ROMSel
+        LDA ROMPrivWksp,X
+        clr_bits(status_tube_off)
+        STA ROMPrivWksp,X
+	JSR pflmss
+	EQUS "*** Reset: ROMS inserted, no shadow.",13
+	EQUS "           TUBE enabled (if present),",13
+	EQUS "           No buffer.",13
+	BRK
+
+.waitbr	JSR pflmss
+	EQUS "Press BREAK to restart..."
+	BRK
+	JMP *		\ Infinite loop!  Press BREAK, people!
+
+.btovr	CMP #&23	\ T-BREAK
+	BEQ *+5
+	JMP btovrf
+	JSR setwrs
+
+	LDA #15		\ Write a 0 into &8007 of all ROM banks
+	STA &140	\ This will remove the "type" of the ROM
+	LDA #7		\ and so effectively remove it from being
+	STA temp1	\ recognised by the OS on BREAK
+	LDA #&80
+	STA temp1+1
+	LDA #0
+.tbrk	LDY &140
+	JSR SWR_write	\ We don't need to delay writes cos we're not reading
+	DEC &140
+	BPL tbrk
+	JSR reset2	\ reset other options (*RESET)
+	JSR pflmss
+	EQUS "*** Reset: ROMS inserted, no shadow,",13
+	EQUS "           Sideways RAM cleared,",13
+	EQUS "           Main memory cleared,",13
+	EQUS "           TUBE enabled (if present),",13
+	EQUS "           No buffer, no RAM Drive.",13
+	BRK
+	JMP waitbr
+
+.btovrf	JSR pflmss
+	EQUB 13
+	EQUS "BBC Computer "
+	BRK
+	PLA
+	BEQ btovr2
+	JSR bnktst	\ How much SWR is there?
+	ASL A
+	ASL A
+	ASL A
+	ASL A		\ Multiply by 16 to get K
+	STA &140
+	LDA #254	\ Find out how much normal RAM
+	LDX #0
+	LDY #&FF
+	JSR OSBYTE
+	TXA
+	BMI k32
+	LDA #16
+	BNE *+4
+.k32	LDA #32
+	CLC
+	ADC &140
+	STA &140
+	LDA #0
+	STA &141
+	JSR plnum0	\ Print the total number
+	JSR pflmss
+	EQUS "K"
+	EQUW 7
+.btovr2	JSR OSNEWL
+IF STLSHADOW
+	LDA status_byte
+	PHA
+	test_bits(status_shadow)
+	BEQ btnos
+	JSR with
+	JSR pflmss
+	EQUS "Shadow",13
+	BRK
+.btnos	PLA
+	PHA
+	test_bits(status_shplus)
+	BEQ btnopl
+	JSR with
+	JSR pflmss
+	EQUS "Shadow +",13
+	BRK
+.btnopl	PLA
+	test_bits(status_buffer)
+	BEQ btnopr
+	JSR with
+	JSR pflmss
+	EQUS "Buffer "
+	BRK
+	LDA buffer_type
+	JSR phex2
+	JSR OSNEWL
+.btnopr	
+ENDIF
+IF RAMDISK
+	LDA ramdisk_present
+	CMP #3
+	BNE btnord
+	JSR with
+	JSR pflmss
+	EQUS "RAM Drive "
+	BRK
+	LDA stl_ramdisk
+	AND #3
+	JSR phex2
+	JSR pflmss
+	EQUS " ("
+	BRK
+	LDA status_byte
+	AND #status_large_ramdisk
+	BEQ rmd64
+	LDA #1
+	JSR phex2
+	LDA #0
+	JSR phex
+	JMP rmd100
+.rmd64	LDA #&64
+	JSR phex
+.rmd100	JSR pflmss
+	EQUS "k)"
+	BRK
+	JSR OSNEWL
+ENDIF
+.btnord	JSR OSNEWL
+	LDA #170
+	LDX #0
+	LDY #255
+	JSR OSBYTE	\ Find ROM table... but elsewhere we've hard
+	STX temp5		\ coded this as &2A1.  Heh.
+	STY temp5+1
+	LDA ramdisk_present
+	CMP #3
+	BNE ntrmki
+	LDY #4		\ If RAMDISk is present, kill banks 4->7
+	LDA #0
+.rmkllp	STA (temp5),Y
+	INY
+	CPY #8
+	BNE rmkllp
+	LDA status_byte
+	test_bits(status_large_ramdisk)
+	BEQ ntrmki
+	LDY #12		\ If Large ramdisk then kill banks 12->14
+	LDA #0
+.rmkll2	STA (temp5),Y
+	INY
+	CPY #15
+	BNE rmkll2
+.ntrmki	LDA status_byte
+	PHA
+	test_bits(status_buffer)
+	BEQ ntprki
+	LDY #12
+	LDA #0
+	STA (temp5),Y	\ Buffer -> kill banks 12,13
+	INY
+	STA (temp5),Y
+.ntprki	PLA
+	test_bits(status_shadow+status_shplus)
+	BEQ ntshki
+	LDY #14		\ Shadow -> kill banks 14,15
+	LDA #0
+	STA (temp5),Y
+	INY
+	STA (temp5),Y
+
+.ntshki
+	LDA srdata_status	\ Kill any banks that are used for SRDATA
+	EOR #&FF
+	ASL A
+	ASL A
+	ASL A
+	ASL A
+	ORA unplug_table
+	TAX
+	LDY #0
+.rromlp	TXA
+	AND rommsk,Y
+	BEQ notrem
+	LDA #0
+	STA (temp5),Y
+.notrem	INY
+	CPY #16
+	BEQ eremlp
+	CPY #8
+	BNE rromlp
+	LDX unplug_table+1
+	JMP rromlp
+.eremlp	LDY #&F			\ Turn off all language ROM bits
+.langlp	LDA ROMTypeTable,Y
+	STA &140,Y		\ Temporary save old values at &140
+	AND #&BF
+	STA ROMTypeTable,Y
+	DEY
+	BPL langlp
+	LDA #187		\ Find what bank BASIC is in
+	LDX #0
+	LDY #&FF
+	JSR OSBYTE
+	CPX #&FF		
+	BEQ basnti
+	TXA			\ Re-enable BASIC as a language
+	TAY
+	LDA &140,Y
+	STA (temp5),Y
+	BNE bascin
+.basnti	LDY RAM_ROMSel		\ If we can't find BASIC, use ourselves
+	LDA &8006
+	STA (temp5),Y
+.bascin
+	\ We've finished messing around with status and ROM tables at
+	\ this point; we'll let the poor machine continue booting as normal!
+	PLA
+	TAY
+	LDA #1
+	RTS
+
+.rommsk	EQUB 1
+	EQUB 2
+	EQUB 4
+	EQUB 8
+	EQUB 16
+	EQUB 32
+	EQUB 64
+	EQUB 128
+	EQUB 1
+	EQUB 2
+	EQUB 4
+	EQUB 8
+	EQUB 16
+	EQUB 32
+	EQUB 64
+	EQUB 128
+
+.with	JSR pflmss
+	EQUS "    with "
+	BRK
+	RTS
+
+.help	LDA (CLI_NAME_VEC),Y	\ Service 9 - *HELP
+	CMP #13
+	BNE nhelp2
+	JMP help2
+.nhelp2
+	\ User specified something with *HELP; let's see if he wants us
+	TYA
+	PHA
+	LDX #&FF
+	DEY
+.helpfl	INX		\ Compare user string to our name
+	INY
+	LDA (CLI_NAME_VEC),Y
+	AND #223
+	CMP helpm2,X
+	BNE nohelp	\ didn't match?  Hmm.
+	CMP #13
+	BNE helpfl	\ Hey, we reached the end of our name.  Match!
+	JMP mrhlp
+.nohelp	LDA (CLI_NAME_VEC),Y
+	CMP #'.'	\ Second chance; maybe users wanted an abbrev name
+	BEQ mrhlp
+	PLA		\ Nope.  Not for us.  Bye, now!
+	TAY
+	LDA #9
+	RTS
+
+.mrhlp	LDY #&FF	\ Display more help
+.mrhlpl	INY
+	LDA helpm,Y
+	JSR OSASCI
+	CMP #&30
+	BNE mrhlpl
+	JSR OSNEWL
+	\ We're going to go through "comtab" listing each command
+	\ when we hit a high-bit character this means we need to
+	\ display the option string, and then skip the address.
+	LDA #LO(comtab)
+	STA temp5
+	LDA #HI(comtab)
+	STA temp5+1
+.mrhlp2	LDA #32
+	JSR OSWRCH
+	JSR OSWRCH
+	LDY #&FF
+.mrhlp3	INY 		\ Display command name
+	LDA (temp5),Y
+	BMI emrhp3	\ Hi-bit?
+	JSR OSASCI
+	JMP mrhlp3
+.emrhp3	SEC		\ Work out where in the option strings table
+	SBC #&81	\ this help message is
+	ASL A
+	TAX
+	LDA CLI_NAME_VEC
+	PHA
+	LDA CLI_NAME_VEC+1
+	PHA
+	LDA msgtbl,X
+	STA CLI_NAME_VEC
+	LDA msgtbl+1,X
+	STA CLI_NAME_VEC+1
+	TYA
+	PHA
+	LDY #&FF
+.mrhlp4	INY		\ Display the options help
+	LDA (CLI_NAME_VEC),Y
+	JSR OSASCI
+	CMP #13
+	BNE mrhlp4
+	PLA
+	TAY
+	PLA
+	STA CLI_NAME_VEC+1
+	PLA
+	STA CLI_NAME_VEC
+	INY
+	INY
+	INY
+	TYA
+	CLC
+	ADC temp5
+	STA temp5
+	LDA temp5+1
+	ADC #0
+	STA temp5+1
+	LDY #0
+	LDA (temp5),Y
+	BNE mrhlp2	\ A NULL here means end of command table
+	PLA
+	TAY
+	LDA #9
+	RTS
+.help2
+	\ Just display our ROM name and what *HELP option gives more
+	PHA
+	TYA
+	PHA
+	TXA
+	PHA
+	LDY #&FF
+.helpl	INY
+	LDA helpm,Y
+	JSR OSASCI
+	CMP #0
+	BNE helpl
+	PLA
+	TAX
+	PLA
+	TAY
+	PLA
+	LDA #9
+	RTS
+
+.helpm	EQUB 13
+	EQUS "RAM Manager 2.0"
+	EQUB 13
+	EQUS "  "
+.helpm2	EQUS "MANAGER"
+	EQUB 13
+	BRK
+
+.newcom	PHA		\ Service 4 - *COMMAND
+	TYA
+	PHA
+	TXA
+	PHA
+	TYA
+	CLC
+	ADC CLI_NAME_VEC
+	STA text
+	LDA CLI_NAME_VEC+1
+	ADC #0
+	STA text+1
+	LDY #0
+	LDA (text),Y
+	AND #223
+	CMP #'M'	\ Each command could be prefixed with an M
+	BNE nofchr
+	INC text
+	BNE nofchr
+	INC text+1
+.nofchr	LDA #LO(comtab)	
+	STA temp5
+	LDA #HI(comtab)
+	STA temp5+1
+	JSR cmpcom	\ See if the user requested one of our commands
+	BCS giveup
+	TXA		\ Yes, he wants us, he really does!
+	SEC
+	ADC text
+	STA text
+	BCC *+4
+	INC text+1
+	PLA
+	PLA
+	PLA
+	JSR clspc	\ Strip off any spaces following the command
+	JSR clnwcm	\ Call the command the user wanted via (&DA)
+	LDA #0
+	RTS		\ All done!
+.clnwcm	JMP (&DA)
+
+.giveup	PLA		\ Not one of my commands
+	TAX
+	PLA
+	TAY
+	PLA
+	RTS
+
+	\ This routine will compare user input to our command table
+	\ User must enter at least one letter, and the results can
+	\ be abbreviated.  If we get a match then (&DA) points to
+	\ the requested routine and carry is clear; if no match then
+	\ carry is set
+.cmpcom	LDY #0
+	LDA (temp5),Y
+	BEQ nmatch	\ End of command table, no match!
+	LDA (text),Y
+	EOR (temp5),Y
+	AND #223
+	BNE diffr2	\ First character doesn't match; next!
+.nxtchr	INY
+	LDA (temp5),Y
+	BMI getadd	\ We've got a high-bit char; complete match!
+	LDA (text),Y
+	EOR (temp5),Y
+	AND #223
+	BEQ nxtchr
+.differ	LDA (text),Y	\ We matched at least 1 char; do we have an abbrev?
+	CMP #'.'
+	BNE diffr2
+	TYA
+	TAX
+.fndend	INY		\ Abbreviation; find the address in the table
+	LDA (temp5),Y
+	BPL fndend
+	INY 
+	LDA (temp5),Y
+	STA &DA
+	INY 
+	LDA (temp5),Y
+	STA &DB
+	CLC 
+	RTS 
+.diffr2	INY 
+	LDA (temp5),Y
+	BPL diffr2
+	INY 
+	INY
+	TYA
+	SEC
+	ADC temp5
+	STA temp5
+	LDA temp5+1
+	ADC #0
+	STA temp5+1
+	JMP cmpcom
+.getadd	INY 
+	LDA (temp5),Y
+	STA &DA
+	INY 
+	LDA (temp5),Y
+	STA &DB
+	DEY 
+	DEY 
+	TYA 
+	TAX 
+	DEX 
+	CLC 
+	RTS 
+
+.nmatch	SEC 	\ Not one of our commands
+	RTS 
+
+\ Command table:
+\    String
+\    Help-message-type
+\    Execute address
+
+.comtab
+IF SOLIDISK
+	EQUS "BUFFER"
+	EQUB &8B
+	EQUW printr
+ENDIF
+	EQUS "BYPASS"
+	EQUB &82
+	EQUW dirct
+	EQUS "FILECOM"
+	EQUB &85
+	EQUW flecom
+	EQUS "FILESYS"
+	EQUB &81
+	EQUW flesys
+	EQUS "HARDBREAK"
+	EQUB &81
+	EQUW hbreak
+	EQUS "NLE"
+	EQUB &81
+	EQUW nle
+IF SOLIDISK
+	EQUS "NOBUFFER"
+	EQUB &81
+	EQUW printn
+ENDIF
+	EQUS "NOROM"
+	EQUB &84
+	EQUW pausrm
+IF STLSHADOW
+	EQUS "NOWORD"
+	EQUB &81
+	EQUW noword
+ENDIF
+	EQUS "PROMS"
+	EQUB &81
+	EQUW proms
+IF SOLIDISK
+	EQUS "PURGE"
+	EQUB &81
+	EQUW purge
+ENDIF
+	EQUS "RAMCLEAR"
+	EQUB &83
+	EQUW clrram
+IF RAMDISK
+	EQUS "RAMDRIVE"
+	EQUB &8A
+	EQUW ramdrv
+ENDIF
+	EQUS "RESET"
+	EQUB &81
+	EQUW reset
+IF SOLIDISK
+	EQUS "RESTART"
+	EQUB &81
+	EQUW rstart
+ENDIF
+	EQUS "RINSERT"
+	EQUB &84
+	EQUW resrom
+IF SOLIDISK
+	EQUS "RLOAD"
+	EQUB &8D
+	EQUW fload
+ENDIF
+IF RAMDISK
+	EQUS "RMDL"
+	EQUB &89
+	EQUW rmdlar
+	EQUS "RMDS"
+	EQUB &89
+	EQUW rmdsma
+ENDIF
+	EQUS "ROUTE"
+	EQUB &82
+	EQUW dirct
+IF SOLIDISK
+	EQUS "RSAVE"
+	EQUB &8E
+	EQUW fsave
+ENDIF
+IF STLSHADOW
+	EQUS "SHADOW"
+	EQUB &8C
+	EQUW shadow
+	EQUS "XSHADOW"
+	EQUB &8C
+	EQUW xshadw
+	EQUS "SHPLUS"
+	EQUB &8C
+	EQUW shplus
+ENDIF
+IF SRDATA
+	EQUS "SRDATA"
+	EQUB &83
+	EQUW srdata
+ENDIF
+	EQUS "SRLOAD"
+	EQUB &87
+	EQUW srload
+IF	SRMENU
+	EQUS "SRMENU"
+	EQUB &8C
+	EQUW srmenu
+ENDIF
+	EQUS "SRREAD"
+	EQUB &88
+	EQUW srread
+IF SRDATA
+	EQUS "SRROM"
+	EQUB &83
+	EQUW srrom
+ENDIF
+	EQUS "SRSAVE"
+	EQUB &86
+	EQUW srsave
+	EQUS "SRSTATUS"
+	EQUB &81
+	EQUW data
+	EQUS "SRWIPE"
+	EQUB &83
+	EQUW srwipe
+	EQUS "SRWRITE"
+	EQUB &88
+	EQUW srwrit
+	EQUS "STANDARD"
+	EQUB &81
+	EQUW stndrd
+	EQUS "TESTRAM"
+	EQUB &81
+	EQUW tstram
+	EQUS "TUBEON"
+	EQUB &81
+	EQUW tubeon
+	EQUS "TUBEOFF"
+	EQUB &81
+	EQUW tubeoff
+	EQUS "UNPLUG"
+	EQUB &84
+	EQUW clrom
+	EQUS "YESROM"
+	EQUB &84
+	EQUW rmpsof
+IF STLSHADOW
+	EQUS "YESWORD"
+	EQUB &81
+	EQUW yeswrd
+ENDIF
+	BRK
+	BRK
+	BRK
+.mssge1 EQUB 13
+.mssge2	EQUS " <rom> <command>",13
+.mssge3	EQUS " <bank>",13
+.mssge4	EQUS " <rom>",13
+.mssge5	EQUS " <command>",13
+.mssge6	EQUS " <fsp> <start> <end> (bank) (Q)",13
+.mssge7	EQUS " <fsp> <address> (bank) (Q)",13
+.mssge8	EQUS " <mem st> <end> <swr> (bank)",13
+.mssge9	EQUS " <D/A>"
+.mssgeA	EQUS " <drive>",13
+.mssgeB	EQUS " <buffer>",13
+.mssgeC	EQUS " <1 / 0>",13
+.mssgeD	EQUS " <fsp> <address> <bank>",13
+.mssgeE	EQUS " <fsp> <start> <end> <bank>",13
+
+.msgtbl	EQUW mssge1
+	EQUW mssge2
+	EQUW mssge3
+	EQUW mssge4
+	EQUW mssge5
+	EQUW mssge6
+	EQUW mssge7
+	EQUW mssge8
+	EQUW mssge9
+	EQUW mssgeA
+	EQUW mssgeB
+	EQUW mssgeC
+	EQUW mssgeD
+	EQUW mssgeE
+
+.nle	\ *NLE - just select ourself as a language
+	LDX RAM_ROMSel
+	LDA #142
+	JMP OSBYTE
+
+.reset	\ *RESET - clear all values, simulate BREAK
+	JSR reset2
+	JMP (OSReset)
+
+.reset2	\ Called from *RESET and also T-BREAK; we clear the unplug table
+	\ and the ramdisk/buffer/shadow states, then do ?FE4E=127
+	LDA #0
+	STA unplug_table
+	STA unplug_table+1
+	STA status_byte
+
+.hbrk2	LDA #151
+	LDX #&4E
+	LDY #127
+	JSR OSBYTE	\ What a funny way of doing ?&FE4E=127
+	RTS
+
+.hbreak	\ *HARDBREAK - pretend we've just powered on
+	JSR hbrk2
+	JMP (OSReset)
+
+.proms	\ *PROMS
+	\ This is a little unstructured.  First time into the program
+	\ we're going to have Y=0.  We save this and then call other
+	\ routines.  They'll call us back with a new value of Y
+	STY &130
+	TYA 
+	JSR phex2		\ Print ROM number
+	LDA ROMTypeTable,Y
+	BEQ tstdis
+	JMP prtrom		\ If we have a ROM here, print it's details
+.tstdis	\ No ROM; let's see if we can guess what the bank is being used for
+	CPY #8
+	BCS promnd
+IF SRDATA
+	LDA srdata_status	\ bits 0->3 hold SRDATA/SRROM state
+	ASL A
+	ASL A
+	ASL A
+	ASL A
+	ORA #15
+	AND rommsk,Y		\ Is this bank being used for SRDATA
+	BNE promnd
+	JSR pflmss		\ Yes!
+	EQUS "      Data"
+	BRK
+	JMP norom2
+ENDIF
+
+.promnd	\ Well, if we're not SRDATA, then what about RAMDISK?
+	LDA ramdisk_present
+	CMP #3
+	BNE promnr
+
+	CPY #4
+	BCC promnr	\ If we have a RAMDISK but are slots 0-3 then not here
+	CPY #8
+	BCC promrd	\ We have RAMDISK and slots 4-7; yes, ramdisk
+	CPY #12
+	BCC promnr	\ Slots 8-A; no
+	CPY #15
+	BEQ promnr	\ Slot F; no
+	LDA status_byte	\ But slots B,C,D will depend on if we have a
+			\ large ramdisk
+	test_bits(status_large_ramdisk)
+	BEQ promnr
+.promrd	\ This slot is being used for RAMdisk purposes
+	JSR pflmss
+	EQUS "      Ram drive"
+	BRK
+	JMP norom2
+
+.promnr	\ Not SRDATA, not Ramdisk.  Shadow?
+	CPY #14
+	BCC promns	\ Only banks 14 and 15
+	LDA status_byte
+	test_bits(status_shadow+status_shplus)
+	BEQ promns
+	JSR pflmss
+	EQUS "      Shadow Memory"
+	BRK
+	JMP norom2
+
+.promns	\ OK... not shadow.  What about buffers?
+	CPY #12
+	BCC promnp
+	CPY #14
+	BCS promnp	\ Only banks 12,13 could be buffers
+	LDA status_byte
+	test_bits(status_buffer)
+	BEQ promnp
+	JSR pflmss
+	EQUS "      Buffer"
+	BRK
+	JMP norom2
+
+.promnp	\ Maybe the ROM is present, but unplugged?
+	CPY #8
+	BCC test1
+	LDA unplug_table+1
+	JMP test2
+.test1	LDA unplug_table
+.test2	AND rommsk,Y
+	BNE test3	\ Well, we're marked as unplugged
+	JMP norom
+.test3	\ Is there really a ROM that we've unplugged?
+	LDA #7
+	STA ROMptr
+	LDA #&80
+	STA ROMptr+1
+	JSR OSRDSC
+	STA ROMptr
+	LDY &130
+	JSR OSRDSC
+	BEQ dis1
+	JMP norom
+.dis1	\ Look for a copyright message
+	LDA ROMptr
+	CLC 
+	ADC #1
+	STA ROMptr
+	LDA ROMptr+1
+	ADC #0
+	STA ROMptr+1
+	LDY &130
+	JSR OSRDSC
+	CMP #'('
+	BEQ dis2
+	JMP norom
+.dis2	LDA ROMptr
+	CLC 
+	ADC #1
+	STA ROMptr
+	LDA ROMptr+1
+	ADC #0
+	STA ROMptr+1
+	LDY &130
+	JSR OSRDSC
+	CMP #'C'
+	BEQ dis3
+	JMP norom
+.dis3	LDA ROMptr
+	CLC 
+	ADC #1
+	STA ROMptr
+	LDA ROMptr+1
+	ADC #0
+	STA ROMptr+1
+	LDY &130
+	JSR OSRDSC
+	CMP #')'
+	BNE norom
+	\ OK!  We found (C) so there's a real ROM here; print it!
+	JSR prtrm2
+	JSR pflmss
+	EQUS " (disabled)"
+	BRK 
+	JMP norom2
+
+.prtrom	\ Here's where we get to if we found a ROM first off
+	JSR prtrm2
+	JMP norom2
+.prtrm2	\ Print details of the ROM
+	LDA #32
+	JSR OSWRCH
+	\ First print (SL) for service/language/both; SPACE where not set
+	LDA #'('
+	JSR OSWRCH
+	LDA #6
+	STA ROMptr
+	LDA #128
+	STA ROMptr+1
+	LDY &130
+	JSR OSRDSC
+	PHA 
+	AND #128
+	BEQ noserv
+	LDA #'S'
+	JMP serv
+.noserv	LDA #32
+.serv	JSR OSWRCH
+	PLA 
+	AND #64
+	BEQ nolang
+	LDA #'L'
+	JMP lang
+.nolang LDA #32
+.lang	JSR OSWRCH
+	LDA #')'
+	JSR OSWRCH
+	LDA #32
+	JSR OSWRCH
+	\ Now read the ROM title until we hit a NULL
+	LDA #9
+	STA ROMptr
+	LDA #&80
+	STA ROMptr+1
+.proml2	LDY &130
+	JSR OSRDSC
+	JSR OSWRCH
+	PHA 
+	LDA ROMptr
+	CLC 
+	ADC #1
+	STA ROMptr
+	LDA ROMptr+1
+	ADC #0
+	STA ROMptr+1
+	PLA 
+	BNE proml2
+	RTS 
+.norom	\ No ROM found! and no RAM usage determined
+	JSR pflmss
+	EQUS "      ?"
+	BRK
+
+.norom2	JSR OSNEWL
+	LDY &130
+	INY
+	CPY #16
+	BEQ *+5
+	\ All the way back to the start
+	JMP proms
+	RTS 
+
+.clrom	\ Clear ROM - *UNPLUG
+	JSR rmchs2	\ What ROM number?
+	PHA 
+	TAY 
+	LDA romx,Y
+	TAX 
+	LDA romy,Y
+	ORA unplug_table
+	STA unplug_table
+	TXA 
+	ORA unplug_table+1
+	STA unplug_table+1	\ Update UNPLUG table
+	LDA #170
+	LDX #0
+	LDY #&FF
+	JSR OSBYTE	\ Find ROM info table (&2A1)
+	STX temp5
+	STY temp5+1
+	PLA 
+	TAY 
+	LDA #0
+	STA (temp5),Y	\ Disable ROM so it won't receive new service calls
+	RTS 
+
+.resrom	\ *INSERT
+	JSR rmchs2	\ What ROM?
+	TAY 
+	LDA romx,Y
+	EOR #&FF
+	TAX 
+	LDA romy,Y
+	EOR #&FF
+	AND unplug_table
+	STA unplug_table
+	TXA
+	AND unplug_table+1
+	STA unplug_table+1	\ Update unplug table
+				\ We don't let the ROM get service calls
+				\ because it might need memory it was never
+				\ granted.  Do *YESROM to take that risk!
+	RTS
+
+.rmpsof	\ * YESROM
+	JSR rmchs2	\ What ROM?
+	PHA
+	PHA
+	LDX #0
+	LDY #&FF
+	LDA #170
+	JSR OSBYTE
+	STX temp5
+	STY temp5+1		\ Get ROM info table (&2A1)
+	PLA
+	TAY
+	LDA #6
+	STA ROMptr
+	LDA #&80
+	STA ROMptr+1
+	JSR OSRDSC	\ Read ROM type
+	TAX
+	PLA
+	TAY
+	TXA
+	STA (temp5),Y	\ Store it.
+	RTS
+
+.pausrm \ *NOROM
+	JSR rmchs2	\ What ROM
+	PHA
+	LDX #0
+	LDY #&FF
+	LDA #170
+	JSR OSBYTE	\ Get ROM info table (&2A1)
+	STX temp5
+	STY temp5+1
+	PLA
+	TAY
+	LDA #0		\ Disable the ROM
+	STA (temp5),Y
+	RTS
+
+\ These two tables are a quick and nasty way of determing what
+\ ROMS to be plugged in/out
+.romy	EQUB 1
+	EQUB 2
+	EQUB 4
+	EQUB 8
+	EQUB 16
+	EQUB 32
+	EQUB 64
+	EQUB 128
+.romx	EQUW 0
+	EQUW 0
+	EQUW 0
+	EQUW 0
+	EQUB 1
+	EQUB 2
+	EQUB 4
+	EQUB 8
+	EQUB 16
+	EQUB 32
+	EQUB 64
+	EQUB 128
+
+\ Get what ROM the user requested
+.gtrmbt	JSR clspc
+	LDA (text),Y
+.cnvhx0	CMP #'W'	\ W/X/Y/Z are also names for 4/5/6/7
+	BCC cnvhex
+	CMP #'Z'+1
+	BCS badrom
+	SEC
+	SBC #'W'-&34
+.cnvhex	SEC
+	SBC #&30
+	BCC badrom	\ If < '0', bad
+	CMP #23		\ If > 'F', bad
+	BCS badrom
+	CMP #17		\ If > 'A' then we have 10->15
+	BCS gthex2
+	CMP #10		\ If > '9' then bad
+	BCS badrom
+	BCC gthex3	\ We're already 0->9
+.gthex2	SEC 
+	SBC #7
+.gthex3	RTS
+
+.badrom	LDX #LO(bdromm)
+	LDY #HI(bdromm)
+	JMP brk
+.bdromm	EQUB 47
+	EQUS "Bad ROM or address"
+	BRK
+
+.tubeon	\ *TUBEON
+        LDX RAM_ROMSel
+        LDA ROMPrivWksp,X
+        clr_bits(status_tube_off)
+        STA ROMPrivWksp,X
+	RTS
+
+.tubeoff \ *TUBEOFF
+        LDX RAM_ROMSel
+        LDA ROMPrivWksp,X
+        set_bits(status_tube_off)
+        STA ROMPrivWksp,X
+	RTS
+
+.clrram	\ *RAMCLEAR
+	JSR rmchs2
+	STA &140
+	JSR setwrs
+	LDA #0		\ Just fill &8000->&BFFF with &00
+	STA temp1
+	LDA #&80
+	STA temp1+1
+.cram1	LDA #0
+	LDY &140
+	JSR SWR_write	\ We don't need to delay writes cos we're not reading
+	INC temp1
+	BNE cram1
+	INC temp1+1
+	LDA temp1+1
+	CMP #&C0
+	BNE cram1
+	RTS
+
+.flesys \ *FILESYS
+	LDA #0
+	LDY #0
+	JSR OSARGS	\ Get filesystem number
+	CMP #10
+	BCS badfs	\ We know about 0->9
+	ASL A
+	TAY
+	LDA fletbl,Y	\ Find where the FS name is stored
+	TAX
+	INY
+	LDA fletbl,Y
+	TAY
+	JMP fsfnd	\ Fount it
+
+.badfs	LDX #LO(unkfs)
+	LDY #HI(unkfs)
+	JMP fsfnd
+
+\ Filesystem offsets
+.fletbl	EQUW nofsm
+	EQUW tpe12m
+	EQUW tape3m
+	EQUW romm
+	EQUW discm
+	EQUW ecnetm
+	EQUW telem
+	EQUW ieeem
+	EQUW adfsm
+	EQUW anfsm
+
+.fsfnd	STX temp5	\ Print the filesystem table name
+	STY temp5+1
+	LDY #&FF
+.filel	INY
+	LDA (temp5),Y
+	JSR OSWRCH
+	CMP #0
+	BNE filel
+	JSR pflmss	\ followed by the string
+	EQUS " filing system"
+	BRK 
+	JMP OSNEWL
+
+.nofsm	EQUS "No"
+	BRK
+.tpe12m EQUS "1200 baud cassette"
+	BRK
+.tape3m EQUS "300 baud cassette"
+	BRK
+.romm	EQUS "ROM"
+	BRK
+.adfsm	EQUS "Advanced "
+.discm	EQUS "Disc"
+	BRK 
+.anfsm	EQUS "Advanced "
+.ecnetm EQUS "Econet"
+	BRK
+.telem	EQUS "Telesoftware"
+	BRK
+.ieeem	EQUS "IEEE"
+	BRK
+.unkfs	EQUS "Unknown"
+	BRK
+
+.dirct	\ *DIRECT
+	JSR gtrmbt
+	PHA
+	INY	\ Point (CLI_NAME_VEC) to the command we want to run
+	TYA
+	CLC
+	ADC text
+	STA text
+	LDA text+1
+	ADC #0
+	STA text+1
+	JSR clspc
+	LDA text
+	STA CLI_NAME_VEC
+	LDA text+1
+	STA CLI_NAME_VEC+1
+	LDY #&FF	\ Copy copy direct3 down to &140
+.dirctl	INY 
+	LDA dirct3,Y
+	STA &140,Y
+	CMP #&60
+	BNE dirctl
+	JMP &140
+
+.dirct3	LDA RAM_ROMSel
+	TAY 
+	PLA 
+	TAX 
+	STA RAM_ROMSel
+	STA ROMsel
+	TYA 
+	PHA
+	LDA #4
+	LDY #0
+	JSR &8003	\ Call service 4 in the requested ROM
+	PLA		\ Restore our ROM
+	STA RAM_ROMSel
+	STA ROMsel
+	RTS
+
+.flecom	\ *FILECOM
+	LDX text
+	LDY text+1
+	LDA #3
+	JMP (&21E)	\ Just call OSFSC option 3; simple!
+
+.clspc	LDY #&FF	\ Skip spaces in the command line
+.clrlp	INY
+	LDA (text),Y
+	CMP #32
+	BEQ clrlp
+	TYA
+	CLC
+	ADC text
+	STA text
+	LDA text+1
+	ADC #0
+	STA text+1
+	LDY #0
+	RTS
+
+.phex	\ print a byte in 2 hex digits
+	\ Basically take the high nibble/16; print it; take the low
+	\ nibble, print it
+	PHA
+	LSR A
+	LSR A
+	LSR A
+	LSR A
+	JSR phex2
+	PLA
+	AND #15
+.phex2	\ Print a nibble in hex
+	CMP #10
+	BCC *+4
+	ADC #6
+	ADC #&30
+	JMP OSWRCH
+
+\ Raise a BRK error.  We have to do this from RAM 'cos the language ROM
+\ error handler won't be able to trap us, otherwise!
+.brk	STX temp5
+	STY temp5+1
+	LDY #&FF
+.brkl	INY
+	LDA (temp5),Y
+	STA &101,Y
+	CMP #0
+	BNE brkl
+	STA &100
+	PHA
+	LDA #&FF
+	PHA
+	RTS
+
+\ Ensure the command is finished
+.cend	JSR clspc
+	LDA (text),Y
+	CMP #13
+	BNE enderr
+	RTS 
+.enderr	LDX #LO(ender2)
+	LDY #HI(ender2)
+	JMP brk
+.ender2	EQUB  48
+	EQUS "Syntax error"
+	BRK
+
+.srwipe \ *SRWIPE puts a 0 into &8007 in the requested bank
+	JSR rmchos	\ What bank?
+	PHA
+	JSR setwrs
+	LDA #7
+	STA temp1
+	LDA #&80
+	STA temp1+1
+	PLA
+	TAY
+	LDA #0
+	JSR SWR_write	\ We don't need to delay writes cos we're not reading
+	RTS 
+
+\ Print the null terminated message pointed by the stack
+.pflmss	PLA 
+	STA temp5
+	PLA 
+	STA temp5+1
+	LDY #1
+.pflmsl	LDA (temp5),Y
+	JSR OSASCI
+	INC temp5
+	BNE *+4
+	INC temp5+1
+	LDA (temp5),Y
+	BNE pflmsl
+	INC temp5
+	BNE *+4
+	INC temp5+1
+	LDA temp5+1
+	PHA 
+	LDA temp5
+	PHA 
+	RTS 
+
+\ Memory moving routines.  They start from opposite ends; moving data
+\ up in memory will start at the end of the block
+\ eg to move &2000->&2200 to &2100 we need to move &2200->&2300 and
+\ then work back to moving &2000->&2100 otherwise we're gonna clobber
+\ our own data.  
+\ Moving data downwards in memory means we start at the beginning of the
+\ data
+
+.scndmv	LDA &144
+	STA temp5
+	LDA &145
+	STA temp5+1
+	BIT &147
+	BPL *+5
+	JSR setwrs	\ if the target is in SWR we need paging help
+	LDA ROMptr
+	SEC 
+	SBC temp1
+	LDA ROMptr+1
+	SBC temp1+1
+	BCC moveup
+	BCS mvdwn
+	RTS 
+
+\ This routine is the "move data down in memory"
+.mvdwn	LDA ROMptr	\ (ROMptr) is source; F8/9 is len; (temp1) is dest
+	CLC 		\ Convert length to final address
+	ADC temp5
+	STA temp5
+	LDA ROMptr+1
+	ADC temp5+1
+	STA temp5+1
+.mvdwnl	BIT EscFlag
+	BMI ememve	\ Escape can abort in case we mess up
+	JSR mvegtb	\ Get the byte we want
+	JSR mvewrb	\ Write the byte we got
+	INC ROMptr
+	BNE *+4
+	INC ROMptr+1
+	INC temp1
+	BNE *+4
+	INC temp1+1
+	LDA ROMptr	\ Update source/dest addresses
+	CMP temp5
+	BNE mvdwnl
+	LDA ROMptr+1
+	CMP temp5+1
+	BNE mvdwnl	\ Have we finished?
+.ememve	RTS 
+
+\ This routine moves data up in memory
+.moveup	LDA ROMptr	\ (ROMptr) is source; F8/9 is len; (temp1) is dest
+	PHA 
+	LDA ROMptr+1
+	PHA 
+	LDA temp5		\ Reduce length by 1
+	SEC
+	SBC #1
+	STA temp5
+	LDA temp5+1
+	SBC #0
+	STA temp5+1
+	LDA ROMptr	\ Set (ROMptr) to top of source
+	CLC 
+	ADC temp5
+	STA ROMptr
+	LDA ROMptr+1
+	ADC temp5+1
+	STA ROMptr+1
+	LDA temp1	\ Set (temp1) to top of dest
+	CLC 
+	ADC temp5
+	STA temp1
+	LDA temp1+1
+	ADC temp5+1
+	STA temp1+1
+	PLA  		\ Set (temp5) to start of source
+	STA temp5+1
+	PLA 
+	STA temp5
+.upmeml	BIT EscFlag	\ Escape can abort
+	BMI ememve
+	JSR mvegtb	\ Get byte
+	JSR mvewrb	\ Write byte
+	LDA temp1	\ Step backwards
+	SEC
+	SBC #1
+	STA temp1
+	LDA temp1+1
+	SBC #0
+	STA temp1+1
+	LDA ROMptr
+	SEC
+	SBC #1
+	STA ROMptr
+	LDA ROMptr+1
+	SBC #0
+	STA ROMptr+1
+	CMP temp5+1		\ Have we finished?
+	BNE upmeml
+	LDA ROMptr
+	CMP temp5
+	BNE upmeml	
+	JSR mvegtb	\ Yes, Handle the last byte
+	JMP mvewrb
+
+.mvegtb	BIT &147	\ Get the byte we want.  If it's from SWR,
+	BMI mvegt2	\ use OSRDSC, else just read the data direct
+	LDY &146
+	JMP OSRDSC
+.mvegt2	LDY #0
+	LDA (ROMptr),Y
+	RTS
+
+.mvewrb	BIT &147	\ Write the byte we want; if it's to SWR
+	BMI mvewr2	\ do page switching, else write direct
+	LDY #0
+	STA (temp1),Y
+	RTS
+.mvewr2	LDY &146
+	JSR SWR_write	\ We don't need to delay writes cos we're not reading
+	RTS
+
+\ We print the number in &140/&141 in decimal
+.plnum0	LDA #0
+	STA &142
+	LDY #8
+.pdecl1	LDX #&30
+.pdecl2	LDA &140
+	SEC
+	SBC decnum,Y
+	PHA
+	LDA &141
+	SBC decnum+1,Y
+	BCC pdeco1
+	STA &141
+	PLA
+	STA &140
+	INX
+	BNE pdecl2
+.pdeco1	PLA
+	TXA
+	CMP #&30
+	BNE pdeco2
+	BIT &142
+	BPL pdeco3
+.pdeco2	DEC &142
+	JSR OSWRCH
+.pdeco3	DEY
+	DEY
+	BPL pdecl1
+	BIT &142
+	BMI pdeco4
+	LDA #&30
+	JSR OSWRCH
+.pdeco4	RTS
+.decnum	EQUW 1
+	EQUW 10
+	EQUW 100
+	EQUW 1000
+	EQUW 10000
+
+\ This code is copied to SWR_write so that ROM routines can write
+\ a byte out to other banks
+.wrswr	LDX RAM_ROMSel
+	STY RAM_ROMSel
+	STY ROMsel
+	LDY #0
+	STA (temp1),Y
+	STX RAM_ROMSel
+	STX ROMsel
+	RTS
+.ewrswr
+
+\ Copy the "wrswr" code to SWR_write
+.setwrs	LDY #0
+.stwrsl	LDA wrswr,Y
+	STA SWR_write,Y
+	INY
+	CPY #ewrswr-wrswr
+	BNE stwrsl
+	RTS
+
+IF	SRMENU
+\ *SRMENU.  We pass a 0 or 1 to the program by writing to &70
+\ and the program picks this up as a flag on whether to sort data or
+\ not
+.srmenu	LDA (text),Y
+	CMP #13
+	BEQ srmeno
+	CMP #'0'
+	BEQ srmeno
+	CMP #'1'
+	BEQ srmeno
+	LDX #LO(srmene)
+	LDY #HI(srmene)
+	JMP brk
+.srmene	EQUB 50
+	EQUS "Bad menu"
+	BRK
+.srmeno	AND #1
+	STA &70
+	\ Now we take the embedded BASIC program and copy it to PAGE
+	LDA #LO(menup)
+	STA ROMptr
+	LDA #HI(menup)
+	STA ROMptr+1
+	LDA #131
+	JSR OSBYTE	\ Where is PAGE
+	STX temp1
+	STY temp1+1
+	LDX #&20	\ Copy 20 pages
+	LDY #0
+.srmenl	LDA (ROMptr),Y
+	STA (temp1),Y
+	INY
+	BNE srmenl
+	INC ROMptr+1
+	INC temp1+1
+	DEX
+	BNE srmenl
+
+	STX temp1		\ X == 0 here
+.srmnl2	LDA srmenk,X	\ Insert "OLD" "RUN" into keuboard
+	TAY
+	LDA #138
+	LDX #0
+	JSR OSBYTE
+	INC temp1
+	LDX temp1
+	CPX #esrmnk-srmenk
+	BNE srmnl2
+	LDA #187
+	LDX #0
+	LDY #&FF
+	JSR OSBYTE	\ Find BASIC
+	LDA #142
+	JMP OSBYTE	\ Enter as language
+
+.srmenk	EQUS "OLD",13
+	EQUS "RUN",13
+.esrmnk
+ENDIF
+
+\ Test to see how many banks are writeable
+\ Basically we read &BFFF; EOR#&FF; write it back; re-read it and if
+\ it's changed then we know it's RAM.
+\ 111/112 hold a bitmap of writeable banks
+.bktest	JSR setwrs
+	LDA #&FF
+	STA ROMptr
+	STA temp1
+	LDA #&BF
+	STA ROMptr+1
+	STA temp1+1
+	LDA #0
+	STA &111
+	STA &112
+	LDY #&F
+	STY &110
+.bnkts1	LDY &110
+	JSR OSRDSC
+	STA &140
+	EOR #&FF
+	LDY &110
+	JSR delay_swr_write
+	LDY &110
+	JSR OSRDSC
+	CMP &140
+	BEQ bnkt2
+	SEC
+	BCS *+3
+.bnkt2	CLC
+	ROL &111
+	ROL &112
+	LDY &110
+	LDA &140
+	JSR delay_swr_write
+	DEC &110
+	BPL bnkts1
+	RTS
+
+\ Return number of RAM banks as an integer
+.bnktst	JSR bktest
+	LDA #0
+	STA &110
+	LDA &111
+	LDX #16
+.btstl1	LSR A
+	BCC *+5
+	INC &110
+	DEX
+	BEQ ebtstl
+	CPX #8
+	BNE btstl1
+	LDA &112
+	BNE btstl1	; Fall through if 0; no need to test it!
+.ebtstl	LDA &110
+	RTS
+
+
+\ FLASH RAM chips aren't sideways RAM; they require a special command
+\ sequence to cause them to enter WRITE mode.  But they can "buffer"
+\ results, so a write to the chip may be read back again and the written
+\ value returned, even though it never made it to the FLASH storage.
+\ But if we pause for long enough (200us?) then the cache is cleared
+\ and stuff works as normal
+\ Through experimentation a loop value of #&50 is too low; #&80 seems to
+\ work.  Let's double that.
+
+.delay_swr_write
+	JSR SWR_write
+	LDX #0
+.delaylp
+	DEX
+	BNE delaylp
+	RTS
+
+.tstram	\ *TESTRAM - just reports on number of banks available
+	JSR cend
+	JSR bnktst
+	STA &140
+	LDA #0
+	STA &141
+	JSR pflmss
+	EQUS "RAM tested: "
+	BRK
+	JSR plnum0
+	JSR pflmss
+	EQUS " banks available."
+	EQUW 13
+	RTS
+
+.xshadw	\ *XSHADOW - *SHADOW and *NOWORD
+	LDA (text),Y
+	CMP #13
+	BEQ xshdok
+	CMP #'1'
+	BEQ xshdok
+	CMP #'0'
+	BNE cshder
+.xshdok	JSR nowrd2	\ Do *NOWORD and then fall through to *SHADOW routine
+
+.shadow	LDA (text),Y
+	INC text
+	BNE *+4
+	INC text+1
+	CMP #'1'
+	BEQ shadof
+	CMP #'0'
+	BEQ shadon
+	CMP #13
+	BEQ shon2
+.cshder	LDX #LO(shader)
+	LDY #HI(shader)
+	JMP brk
+.shader	EQUB 49
+	EQUS "Bad shadow mode"
+	BRK
+.shadof	JSR cend
+.shoff2	LDA status_byte
+	clr_bits(status_shadow)
+	STA status_byte
+	LDA #&EF	\ *FX 249,1,0 - updates "shadow state"
+	LDX #1		\ (*YESWORD state will trap this)
+	LDY #0
+	JMP OSBYTE
+
+.shadon	JSR cend
+.shon2	LDA status_byte
+	set_bits(status_shadow)
+	STA status_byte
+	LDA #&EF
+	LDX #0
+	LDY #0
+	JSR OSBYTE
+	LDA #0
+	STA ROMTypeTable+14	\ Solidisk SHADOW uses banks 14,15 so ensure
+	STA ROMTypeTable+15	\ any ROM in those slots isn't used
+
+.shadvs	LDA status_byte		\ Set shadow mode vectors
+	test_bits(status_vectors)
+	BEQ *+3
+	RTS
+	LDY #0			\ We need to steal vectors to emulate SHADOW
+.shadl2	LDA WORDV,Y		\ Copy WORDV, WRCHV, RDCHV
+	STA IND1V,Y		\ to IND1V, IND2V, IND3V
+	INY
+	CPY #6
+	BNE shadl2
+	LDA BYTEV		\ We also need osbyte, but ran out of space
+	STA OldByteV		\ so copy to page3
+	LDA BYTEV+1
+	STA OldByteV+1
+	LDA #&A8		\ Where do extended vectors live?
+	LDX #0
+	LDY #&FF
+	JSR OSBYTE
+	STX &A8
+	STY &A9
+	LDY #&C*3/2		\ WORDV offset to here
+.shdl3a	LDA (&A8),Y		\ Push the next 3 vectors (9 bytes) to stack
+	PHA
+	INY
+	CPY #&C*3/2+9
+	BNE shdl3a
+	LDY #&30*3/2+9		\ Store these values into IND1V-> extended
+.shdl3b PLA			\ (basically copy extended WORDV/RDCHV/WRCHV)
+	DEY
+	STA (&A8),Y
+	CPY #&30*3/2
+	BNE shdl3b
+	LDY #&A*3/2		\ And the same for extended OSBYTE
+.shadl4	LDA (&A8),Y
+	PHA
+	INY
+	CPY #&A*3/2+2
+	BNE shadl4
+
+	LDX RAM_ROMSel
+	LDA ROMPrivWksp,X	\ We don't actualy use memory, so we can
+	test_bits(capture_osword)\ re-use the Privileged Workspace location
+	ORA (&A8),Y		\ store in the low-4 bits the ROM that
+	STA ROMPrivWksp,X	\ had the extended osbyte vector previously
+	LDY #1
+.shdl4b	PLA			\ store the extended osbyte vectors
+	STA extended_osbyte,Y
+	DEY
+	BPL shdl4b
+	LDA ROMPrivWksp,X	\ Top bit of privwkspace says whether we
+	BPL ntvc0C		\ want to steal OSWORD for our own needs
+
+	LDA #&FF		\ OK, we want to steal OSWORD
+	STA WORDV+1
+	LDA #&12
+	STA WORDV
+.ntvc0C	LDA #&FF
+	STA BYTEV+1
+	STA WRCHV+1
+	STA RDCHV+1
+	LDA #&A*3/2
+	STA BYTEV
+	LDA #&E*3/2
+	STA WRCHV
+	LDA #&10*3/2
+	STA RDCHV
+	LDY #&A*3/2     
+	LDX #0
+.shadl5	LDA shvctb,X	\ Copy our vector table into place
+	STA (&A8),Y
+	INY
+	INX
+	LDA shvctb,X
+	STA (&A8),Y
+	INY
+	INX
+	LDA RAM_ROMSel
+	STA (&A8),Y
+	INY
+	CPX #8
+	BNE shadl5
+	CLI
+	LDA status_byte
+	clr_bits(status_vdu)
+	set_bits(status_vectors)
+	STA status_byte
+	RTS
+
+.shvctb	EQUW shadbt
+	EQUW shadwd
+	EQUW shadwr
+	EQUW shadrd
+
+.stoshm		\ Copy memory from &2000->&7FFF from main memory
+		\ to Solidisk "shadow" area
+	LDA #0
+	STA &AE
+	TAY
+	LDA #&20
+	STA &AF
+.shadl	LDX #ACCCON_main
+IF STLSHADOW
+        STX ACCCON
+ENDIF
+	LDA (&AE),Y
+	LDX #ACCCON_shadow
+IF STLSHADOW
+        STX ACCCON
+ENDIF
+	STA (&AE),Y
+	INY
+	BNE shadl
+	INC &AF
+	LDA &AF
+	CMP #&80
+	BNE shadl
+	RTS
+
+.rstshm	LDA #&85	\ Restore memory from Solidisk board to main memory
+	LDX &AE
+	JSR OSBYTE
+	STY &A8
+	LDY #0
+	STY &AE
+	LDA #&20
+	STA &AF
+.rshadl	LDX #ACCCON_shadow
+IF STLSHADOW
+        STX ACCCON
+ENDIF
+	LDA (&AE),Y
+	LDX #ACCCON_main
+IF STLSHADOW
+        STX ACCCON
+ENDIF
+	STA (&AE),Y
+	INY
+	BNE rshadl
+	INC &AF
+	LDA &AF
+	CMP &A8
+	BNE rshadl
+	RTS
+
+.shadwr	PHA
+	TYA
+	PHA
+	TXA
+	PHA
+	TSX
+	LDA &103,X
+	PHA		\ Copy the character we need to write
+	LDA status_byte
+	test_bits(status_mode)
+	BEQ normwr
+	\ We get here if a mode change is pending, but we haven't done one yet
+	LDA status_byte
+	ASL A
+	BMI shmode
+	ASL A
+	BPL noshad
+	PLA
+	PHA
+	BPL noshad
+.shmode	LDA status_byte
+	test_bits(status_inshadow)
+	BNE alshad
+	JSR stoshm	\ We need to copy main program memory into shadow
+.alshad	
+	\ Make the main memory (screen) writeable
+	LDA #ACCCON_main
+IF STLSHADOW
+	STA ACCCON
+ENDIF
+	PLA
+	JSR oldwch
+	\ Make the shadow (non-screen) memory writeable
+	LDA #ACCCON_shadow
+IF STLSHADOW
+	STA ACCCON
+ENDIF
+	\ We're definitely in shadow mode, so ensure all the status
+	\ bits are updated.
+	LDA status_byte
+	set_bits(status_vdu+status_inshadow)
+	clr_bits(status_mode)
+	STA status_byte
+	LDA vdu_status_byte
+	set_bits(vdu_status_shadow)
+	STA vdu_status_byte
+	PLA
+	TAX
+	PLA
+	TAY
+	PLA
+	RTS
+
+.noshad
+	\ Make the main memory (screen) writeable
+	LDA #ACCCON_main
+IF STLSHADOW
+	STA ACCCON
+ENDIF
+	PLA
+	PHA
+	JSR oldwch      
+	LDA status_byte
+	test_bits(status_inshadow)
+	BEQ isntsh
+	PLA
+	PHA
+	STA &AE
+	JSR rstshm	\ Restore shadow memory back down to normal
+.isntsh	PLA
+	\ We are no longer in shadow mode, so set it all back
+	LDA status_byte
+	clr_bits(status_vdu+status_mode+status_inshadow)
+	STA status_byte
+	LDA vdu_status_byte
+	\ Original this said "AND #&E0" but I think that's a bug
+	\ and would result in turning off lots of values
+	\ it should have been &EF and so...
+	clr_bits(vdu_status_shadow)
+	STA vdu_status_byte
+	PLA
+	TAX
+	PLA
+	TAY
+	PLA
+	RTS
+
+	\ No mode change pending...
+.normwr	PLA
+	PHA
+	CMP #&16
+	BNE ntmd	\ Not a VDU 22
+	LDA #&DA
+	LDX #0
+	LDY #&FF	\ How many bytes are needed to complete this VDU?
+	JSR OSBYTE
+	CPX #0
+	BNE ntmd	\ If it's zero then it's not a VDU 22
+	LDA status_byte
+	set_bits(status_mode)	\ Yeah, user is trying to change MODE
+	STA status_byte
+.ntmd
+	\ Make the main memory (screen) writeable
+	LDA #ACCCON_main
+IF STLSHADOW
+	STA ACCCON
+ENDIF
+	PLA
+	JSR oldwch
+	JSR stFE34	\ Make sure the right bank is writeable
+	PLA
+	TAX
+	PLA
+	TAY
+	PLA
+	RTS
+
+.oldwch	JMP (&232)
+
+.oldrdc	JMP (&234)
+
+	\ OSRDCH routine handling shadow memory properly
+.shadrd	PHA
+	\ Make the main memory (screen) readable
+	LDA #ACCCON_main
+IF STLSHADOW
+	STA ACCCON
+ENDIF
+	PLA
+	JSR oldrdc
+	PHP
+	PHA
+	TXA
+	PHA
+	TYA
+	PHA
+	JSR stFE34	\ Make sure the right bank is readable
+	PLA
+	TAY
+	PLA
+	TAX
+	PLA
+	PLP
+	RTS
+
+.shplus	\ *SHPLUS
+	LDA (text),Y
+	INC text
+	BNE *+4
+	INC text+1
+	CMP #'1'
+	BEQ plusof
+	CMP #'0'
+	BEQ pluson
+	CMP #13
+	BEQ plon2
+	LDX #LO(shader)
+	LDY #HI(shader)
+	JMP brk
+.plusof	JSR cend
+	LDA status_byte
+	clr_bits(status_shplus)
+	STA status_byte
+	RTS
+.pluson	JSR cend
+.plon2	LDA status_byte
+	set_bits(status_shplus)
+	STA status_byte
+	LDA #0
+	STA ROMTypeTable+14	\ Solidisk SHADOW uses banks 14,15 so ensure
+	STA ROMTypeTable+15	\ any ROM in those slots isn't used
+	JMP shadvs
+
+.noword \* NOWORD
+	JSR cend
+.nowrd2 LDX RAM_ROMSel
+	LDA ROMPrivWksp,X
+	clr_bits(capture_osword)	\ We don't want to intercept OSWORD
+	STA ROMPrivWksp,X
+	LDA status_byte
+	test_bits(status_vectors)
+	BEQ endnow
+	LDA IND1V	\ We had the vector; let's restore it
+	STA WORDV
+	LDA IND1V+1
+	STA WORDV+1
+.endnow	RTS
+
+.yeswrd \* YESWORD
+	JSR cend
+	LDX RAM_ROMSel
+	LDA ROMPrivWksp,X
+	set_bits(capture_osword)	\ We want to intercept OSWORD
+	STA ROMPrivWksp,X
+	LDA status_byte
+	test_bits(status_vectors)
+	BEQ endnow
+	LDA #&12	\ We need to steal the vector
+	STA WORDV
+	LDA #&FF
+	STA WORDV+1
+	RTS
+
+	\ *SRREAD and *SRWRITE routines
+	\ Basically build an OSWORD &42 structure based on command line
+	\ Structure is built at &120 (double use of the stack)
+.srread	LDA #0
+	BEQ srwrit+2
+
+.srwrit	LDA #&80
+        STA &120	\ &120 is mode; 0=read, &80=write
+	JSR gtpadd	\ Get the memory start address
+	STX &121
+	STY &122
+.swrl1	CMP #'+'	\ Next character should be a + or a space
+	BEQ srwr2
+	CMP #' '
+	BEQ srwr2
+.jbad	JMP bad
+.srwr2	PHA		\ Save whether the end is a +len
+	LDA #&FF
+	STA &123
+	STA &124
+	JSR gtpadd	\ Get the next address
+	CMP #' '	\ Which better be followed by a space
+	BNE jbad
+	STX &125
+	STY &126
+	PLA
+	CMP #'+'	\ If we did not have +len then sub end from start
+	BEQ srwr3	\ start to get the length
+	LDA &125
+	SEC
+	SBC &121
+	STA &125	
+	LDA &126	
+	SBC &122
+	STA &126
+.srwr3	JSR gtpadd	\ get the address in SWR that we want
+	STX &128
+	STY &129
+	CMP #13
+	BEQ srwrps
+	CMP #32
+	BNE *+7
+	JSR clspc
+	LDA (text),Y
+	CMP #13
+	BEQ srwrps
+	JSR rmchs2	\ if a bank was selected, save that
+	STA &127
+	JMP srwr4
+.srwrps	LDA &120	\ No bank was selected; use pseudo address
+	ORA #&40
+	STA &120
+.srwr4	LDX #&20
+	LDY #1
+	STX OSbyteX
+	STY OSbyteY
+	JSR osw42	\ Call OSWORD &42 (which we catch)
+	RTS
+
+.bad	LDX #LO(bad2)
+	LDY #HI(bad2)
+	JMP brk
+.bad2	EQUB 252
+	EQUS "Bad command"
+	BRK
+
+\ Routine to get an address from the command line, and also pre-inspect
+\ the next byte
+.gtpadd	JSR clspc
+	STY temp5
+	STY temp5+1
+.gtpadl	LDA (text),Y
+	INC text
+	BNE *+4
+	INC text+1
+	JSR tstdig
+	BCC epadd
+	JSR cnvhex
+	ASL temp5
+	ROL temp5+1
+	ASL temp5
+	ROL temp5+1
+	ASL temp5
+	ROL temp5+1
+	ASL temp5
+	ROL temp5+1
+	ORA temp5
+	STA temp5
+	JMP gtpadl
+.epadd	CMP #32
+	BNE epadd2
+	JSR clspc
+	LDY #0
+	LDA (text),Y
+	JSR tstdg2
+	BCS epaddd
+	INC text
+	BNE epadd2
+	INC text+1
+	JMP epadd2
+.epaddd	LDA #' '
+.epadd2	LDX temp5
+	LDY temp5+1
+	RTS
+
+\ Is the digit a valid hex character?
+.tstdig	CMP #'0'
+	BCC tstntd
+	CMP #'9'+1
+	BCC tstisd      
+	CMP #'A'
+	BCC tstntd
+	CMP #'G'
+	BCS tstntd
+.tstisd	SEC
+	RTS
+.tstntd	CLC
+.tsfg2o	RTS
+
+\ Valid hex plus W/X/Y/Z options
+.tstdg2	JSR tstdig
+	BCS tsfg2o
+	CMP #'W'
+	BCC tstntd
+	CMP #'Z'+1
+	BCS tstntd
+	BCC tstisd
+
+\ Ensure the correct memory bank is paged in
+.stFE34	LDA status_byte
+	test_bits(status_vdu)
+	BEQ *+4
+	ORA #2	\ Kludge based on knowing &82 is the right value
+IF STLSHADOW
+	STA ACCCON
+ENDIF
+	RTS
+
+\ OSBYTE calls in shadow mode
+.shadbt	CMP #&84
+	BEQ osb84
+	CMP #&85
+	BEQ osb85
+	CMP #&81
+	BEQ osb817
+	CMP #&87
+	BEQ osb817
+.oldosb	PHA		\ Not one of ours; work out who we should call
+	LDA OldByteV+1
+	CMP #&FF
+	BNE norosb
+	LDA OldByteV
+	CMP #&A*3/2
+	BNE norosb
+	LDY #0
+.oldbtl	LDA extosb,Y
+	STA &D00,Y
+	INY
+	CPY #eextbt-extosb
+	BNE oldbtl
+	LDX RAM_ROMSel
+	LDA ROMPrivWksp,X	\ What ROM was the old extended vector from?
+	JMP &D01
+.norosb	PLA
+	JMP (OldByteV)
+
+\ This routine gets copied into page D so we can call another ROM's vector
+.extosb	RTI
+	STA RAM_ROMSel
+	STA ROMsel
+	PLA
+	JMP (extended_osbyte)
+.eextbt
+
+\ OSbytes &81 and &87
+\ Basically just make the normal memory available and then call the original
+\ OSbyte routine, then put the right bank back again
+.osb817	PHA
+	LDA status_byte
+	BPL norm17
+	LDA #ACCCON_main
+IF STLSHADOW
+	STA ACCCON
+ENDIF
+	LDA status_byte
+	clr_bits(status_vdu)
+	STA status_byte
+	PLA
+	JSR oldosb
+	PHP
+	PHA
+	LDA status_byte
+	set_bits(status_vdu)
+	STA status_byte
+	JSR stFE34	\ Page the right bank in
+	PLA
+	PLP
+	RTS
+
+.norm17	PLA
+	JMP oldosb
+
+\ Osbyte &84 - HIMEM
+.osb84	LDA status_byte
+	test_bits(status_inshadow)
+	BNE him8
+	LDA #&84	\ We're not in shadow mode, call the original call
+	BNE oldosb
+
+\ Osbyte &85 - HIMEM for a given mode
+.osb85	LDA status_byte
+	test_bits(status_shadow)
+	BNE him8b
+	LDA status_byte
+	test_bits(status_shplus)
+	BEQ norhim
+	TXA	\ If we're in shplus mode and the mode is >128 then shadow
+	BMI him8b
+.norhim
+	\ Since we're not in any shadow routine, call the original function
+	LDA #&85
+	JMP oldosb
+
+.him8_	PHA
+	LDA #254	\ Read how much memory we have
+	LDX #0
+	LDY #&FF
+	JSR OSBYTE
+	TXA
+	BPL *+6
+	LDY #&80	\ 32K machine --> &8000
+	BNE *+4
+	LDY #&40	\ 16K machine --> &4000
+	LDX #0
+	PLA
+	RTS
+
+.him8	LDA #&84
+	BNE him8_
+
+.him8b	LDA #&85
+	BNE him8_
+
+.data	\ *SRSTATUS
+	JSR cend
+	LDA status_byte
+	PHA
+	JSR pflmss
+	EQUB 13
+	EQUS "SHADOW "
+	BRK
+	PLA
+	PHA
+	test_bits(status_shadow)
+	BEQ *+4
+	LDA #1
+	EOR #1
+	JSR phex2
+	JSR pflmss
+	EQUB 13
+	EQUS "SHPLUS "
+	BRK
+	PLA
+	PHA
+	test_bits(status_shplus)
+	BEQ *+4
+	LDA #1
+	EOR #1
+	JSR phex2
+	JSR OSNEWL
+	PLA
+	PHA
+	test_bits(status_inshadow)
+	BNE datans
+	JSR pflmss
+	EQUS "Not "
+	BRK
+.datans	JSR pflmss
+	EQUS "In Shadow Mode",13
+	EQUS "Vectors "
+	BRK
+	PLA
+	test_bits(status_vectors)
+	BNE datavs
+	JSR pflmss
+	EQUS "Not Claimed",13
+	EQUW 13
+	RTS
+.datavs	JSR pflmss
+	EQUS "Claimed"
+	BRK
+	LDX RAM_ROMSel
+	LDA ROMPrivWksp,X
+	BMI datawd
+	JSR pflmss
+	EQUS "(not OSWORD)"
+	BRK
+.datawd	JSR OSNEWL
+	JMP OSNEWL
+
+\ New OSBYTE calls
+.romosb	LDA OSbyteA
+	CMP #&72
+	BEQ osb72
+	CMP #&70
+	BEQ osb70
+	CMP #&6F
+	BEQ osb6F
+	CMP #&6C
+	BEQ osb6C
+	CMP #&A5
+	BEQ osbA5
+	CMP #&45
+	BNE *+5
+	JMP osb45
+	CMP #&44
+	BNE *+5
+	JMP osb44
+	LDA #7		\ We don't like this one; carry on!
+	RTS
+
+.osb6C	LDX OSbyteX	\ Set main or SHADOW memory readable at &3000
+	BEQ *+4
+	LDX #ACCCON_shadow	\ X=0 or 130, to write into Solidisk ACCON
+IF STLSHADOW
+        STX ACCCON
+ENDIF
+	JMP endosb
+
+.osb72	LDA OSbyteX		\ *SHADOW
+	BEQ osb72a
+	JSR shoff2
+	JMP endosb
+.osb72a	JSR shon2
+.endosb	LDY OSbyteY
+	LDA #0
+	RTS
+
+.osb70	LDA OSbyteX		\ Set where VDU is going to write
+	PHA
+	TAX
+	LDY #0
+	LDA #&FA
+	JSR OSBYTE	\ Read where VDU currently goes
+	PLA
+	PHA
+	BEQ osb70b	\ 0 ==> shadow status
+	CMP #1
+	BEQ osb70c	\ 1 ==> main memory
+	LDX #status_vdu	\ 2 ==> shadow memory
+	BNE osb70o
+.osb70c	LDX #0
+	BEQ osb70o
+.osb70b	LDA status_byte
+	test_bits(status_inshadow)
+	BEQ osb70c
+	LDX #status_vdu
+.osb70o	PLA
+	STA OSbyteX
+	\ At this point X==0 or X==status_vdu
+	LDA status_byte
+	clr_bits(status_vdu)
+	STA status_byte
+	TXA
+	ORA status_byte
+	STA status_byte
+	JSR stFE34	\ Ensure the right bank is paged in
+	JMP endosb
+
+.osb6F	LDX OSbyteX		\ Osbyte 6F - *YESWORD/*NOWORD equivalents
+	BNE osb6Fb
+	JSR yeswrd+3
+	JMP endosb
+.osb6Fb	JSR nowrd2
+	JMP endosb
+
+.osbA5	LDA vdu_status_byte
+	test_bits(vdu_cursor_editing)
+	BEQ osbA5b
+	LDA vdu_input_x	\ Read the OS cursor locations directly
+	STA OSbyteX
+	LDY vdu_input_y
+	LDA #0
+	RTS
+.osbA5b	LDA #&86	\ We can call osbyte &86 here...
+	JSR OSBYTE
+	STX OSbyteX
+	LDA #0
+	RTS
+
+.stndrd	\ *STANDARD
+	JSR cend
+	LDA #187
+	LDX #0
+	LDY #&FF
+	JSR OSBYTE	\ Find BASIC
+	LDA romy,X	\ Turn off every ROM except BASIC
+	EOR #&FF
+	STA unplug_table
+	\ Originaly this was LDA romx,Y but I think that's a bug!
+	LDA romx,X
+	EOR #&FF
+	STA unplug_table+1
+	LDA #0
+	STA status_byte
+        LDX RAM_ROMSel
+        LDA ROMPrivWksp,X
+        set_bits(status_tube_off) \ Disable tube
+        STA ROMPrivWksp,X
+	JMP hbreak
+
+\ Shadow OSWORD calls - we just trap OSWORD 9 (read pixel) - page in
+\ the main memory, call the original routine, page back the correct
+\ memory bank
+.shadwd
+	CMP #9
+	BNE shwdov
+	LDA #ACCCON_main
+IF STLSHADOW
+	STA ACCCON
+ENDIF
+	LDA #9
+	JSR shwdov
+	PHA
+	JSR stFE34
+	PLA
+	RTS
+.shwdov	JMP (&230)
+
+IF SRDATA
+.srdata	\ *SRDATA
+IF RAMDISK
+	LDA ramdisk_present
+	CMP #3
+	BNE *+5
+	JMP clash
+ENDIF
+	JSR datach	\ What databank
+	TAX
+	LDA #0
+	STA ROMTypeTable+4,X	\ Solidisk SRDATA is banks 4->7
+	LDA romy,X		\ Set SRDATA status bits
+	EOR #&FF
+	AND srdata_status
+	STA srdata_status
+	RTS
+
+.srrom	\ *SRROM
+	JSR datach
+	TAX
+	LDA romy,X
+	ORA srdata_status
+	STA srdata_status	\ We don't *YESROM
+	RTS
+ENDIF
+
+\ Get ROM bank and move pointer to next byte
+.rmchos	JSR gtrmbt
+	INC text
+	BNE *+4
+	INC text+1
+	RTS
+
+\ Get ROM bank and verify end of command
+.rmchs2	JSR rmchos
+	PHA
+	JSR cend
+	PLA
+	RTS
+
+\ Get ROM bank and verify that it's between 4 and 7
+\ Return 0->3
+.datach	JSR rmchs2
+	CMP #4
+	BCC ntdtsw
+	CMP #8
+	BCS ntdtsw
+	AND #3
+	RTS
+
+.ntdtsw	LDX #LO(ndtsw2)
+	LDY #HI(ndtsw2)
+	JMP brk
+.ndtsw2	EQUB 51
+	EQUS "Not DATA bank"
+	BRK
+
+\ OSBYTE 45 - report on RAM banks being used for SRDATA
+\ ... I should disable this if NOT(SRDATA) but I think it's good
+\ to keep it
+.osb45	LDA srdata_status
+	EOR #&F
+	AND #&F
+	STA OSbyteX
+	LDA #0
+	RTS
+
+\ OSBYTE 44 - reports on if banks 4/5/6/7 are RAM or not
+\ ... again, 4/5/6/7 are designed for Master (and STL 2M128) and
+\ so likely not much use if SRDATA is not set, but...
+.osb44	JSR bnktst
+	LDA &111
+	LSR A
+	LSR A
+	LSR A
+	LSR A
+	JMP osb45+3
+
+\ Service 8 - unknown OSWORD
+.romwrd	LDA OSbyteA
+	CMP #&42
+        BNE *+5
+	JMP osw42
+	CMP #&43
+	BNE *+5
+	JMP osw43
+IF RAMDISK
+\ For Solidisk routines to work properly, we need to implement
+\ OSword &78, &79, &7B.  The Solidisk routines are likely to
+\ destroy the data used in this ROM, so we're going to temporarily
+\ store our work area on the stack, call the OSword routine, then
+\ restore our data back.  I hope this works...
+	LDA ramdisk_present
+	CMP #3
+	BEQ *+5
+	JMP normwd
+	TXA
+	PHA
+	TYA
+	PHA
+	LDY #0		\ protect our data!
+.strglp	LDA &380,Y
+	PHA
+	INY
+	CPY #&1B
+	BNE strglp
+	LDA &AD
+	PHA
+	LDA &AE
+	PHA
+	LDA &B0
+	PHA
+	LDA &B1
+	PHA
+	LDA temp2
+	PHA
+	LDA temp3
+	PHA
+	LDA temp4
+	PHA
+
+	LDA OSbyteA	\ Are we looking at a STL Ramdisk call?
+	CMP #&78
+	BNE ntwd78
+	JSR osw78
+	JMP ermwd
+.ntwd78	CMP #&79
+	BNE ntwd79
+	JSR osw79
+	JMP ermwd
+.ntwd79	CMP #&7B
+	BNE ermwd2
+	JSR osw7B
+
+.ermwd	PLA		\ Restore our data! Return success
+	STA temp4
+	PLA
+	STA temp3
+	PLA
+	STA temp2
+	PLA
+	STA &B1
+	PLA
+	STA &B0
+	PLA
+	STA &AE
+	PLA
+	STA &AD
+	LDY #&1A
+.rstrgl	PLA
+	STA &380,Y
+	DEY
+	BPL rstrgl
+	PLA
+	TAY
+	PLA
+	TAX
+	LDA #0
+	RTS
+
+.ermwd2	PLA		\ Restore our data and return fail
+	STA temp4
+	PLA
+	STA temp3
+	PLA
+	STA temp2
+	PLA
+	STA &B1
+	PLA
+	STA &B0
+	PLA
+	STA &AE
+	PLA
+	STA &AD
+	LDY #&1A
+.rstrg2	PLA
+	STA &380,Y
+	DEY
+	BPL rstrg2
+	PLA
+	TAY
+	PLA
+	TAX
+ENDIF
+.normwd	LDA #8
+	RTS
+
+\ OSword 42; SRREAD/SRWRITE
+.osw42	CLI
+	LDY #0
+	LDA (OSbyteX),Y
+	AND #&C0
+	BEQ absrd
+	\ If we're not SRDATA then should we disable this?
+	\ Eh... let it deal with srdata_status indicating no data banks
+	CMP #&40
+	BEQ pseurd
+	CMP #&80
+	BEQ abswr
+	\ If we're not SRDATA then should we disable this?
+	\ Eh... let it deal with srdata_status indicating no data banks
+	BNE pseuwr
+
+\ Absolute read from a SWR bank; just set up the block move values
+\ and do it!
+.absrd	LDA #0
+	STA &147
+	INY
+	LDA (OSbyteX),Y
+	STA temp1
+	INY
+	LDA (OSbyteX),Y
+	STA temp1+1
+	LDY #5
+	LDA (OSbyteX),Y
+	STA &144
+	INY
+	LDA (OSbyteX),Y
+	STA &145
+	INY
+	LDA (OSbyteX),Y
+	STA &146
+	INY
+	LDA (OSbyteX),Y
+	STA ROMptr
+	INY
+	LDA (OSbyteX),Y
+	STA ROMptr+1
+	JMP scndmv
+
+\ Absolute write is pretty much similar; block move!
+.abswr	LDA #&FF
+	STA &147
+	INY
+	LDA (OSbyteX),Y
+	STA ROMptr
+	INY
+	LDA (OSbyteX),Y
+	STA ROMptr+1
+	LDY #5
+	LDA (OSbyteX),Y
+	STA &144
+	INY
+	LDA (OSbyteX),Y
+	STA &145
+	INY
+	LDA (OSbyteX),Y
+	CMP #&10
+	BCC *+4
+	SBC #12
+	STA &146
+	INY
+	LDA (OSbyteX),Y
+	STA temp1
+	INY
+	LDA (OSbyteX),Y
+	STA temp1+1
+	JMP scndmv
+
+\ "Pseudo" read/write.  This needs to work out what bank is needed
+
+.pseurd	LDA #0
+	BEQ pseuwr+2
+
+.pseuwr	LDA #&FF
+	STA &147
+	INY
+	LDA (OSbyteX),Y
+	STA &150
+	INY
+	LDA (OSbyteX),Y
+	STA &151
+	LDY #5
+	LDA (OSbyteX),Y
+	STA &154
+	INY
+	LDA (OSbyteX),Y
+	STA &155
+	INY
+	INY
+	LDA (OSbyteX),Y
+	STA &152
+	INY
+	LDA (OSbyteX),Y
+	STA &153
+	JSR tstdat
+	JSR pseini
+.pseulp	JSR mvegtb
+	JSR mvewrb
+	BIT EscFlag
+	BMI epselp
+	JSR pseinc
+	LDA &154
+	SEC
+	SBC #1
+	STA &154
+	LDA &155
+	SBC #0
+	STA &155
+	ORA &154
+	BNE pseulp
+.epselp	LDA #0
+	RTS
+
+\ Now things get interesting; SRLOAD/SRSAVE routines can, in theory, load
+\ into SRDATA banks.  If we're not actually able to handle SRDATA then
+\ we shouldn't include it as a possible load location.  But we do force
+\ srdata_status to &FF if we're not able to handle SRDATA and so this
+\ routine _should_ return the correct result either way... so let's
+\ keep it
+.tstdat	LDA &152
+	CLC
+	ADC &154
+	STA &156
+	LDA &153
+	ADC &155
+	STA &157
+	LDA &156
+	BNE *+5 ; ALLOW 1 ERROR @ END
+	DEC &157
+	LDA &157
+	JSR cnvbnk
+	AND #3
+	STA &156	; LAST SWR +1
+	INC &156
+	LDA &153
+	JSR cnvbnk
+	AND #3
+	TAY	; FIRST SWR
+.tstdtl	LDA romy,Y
+	AND srdata_status
+	BNE oswntd
+	INY     
+	CPY #4
+	BEQ etstdl
+	CPY &156
+	BNE tstdtl
+.etstdl	RTS
+
+.oswntd	PLA	\ KILL RETURN ADDRESS.  What a nasty way of aborting a function!
+	PLA
+	LDA #0
+	RTS
+
+.cnvbnk	ROL A
+	ROL A
+	ROL A
+	AND #3
+	ORA #4
+	RTS
+
+.pseini	LDA &153
+	JSR cnvbnk
+	STA &146
+	BIT &147
+	BPL psgtbr
+	LDA &153
+	AND #&3F
+	ORA #&80
+	STA temp1+1
+	LDA &152
+	STA temp1
+	LDA &150
+	STA ROMptr
+	LDA &151
+	STA ROMptr+1
+	JMP setwrs
+.psgtbr	LDA &153
+	AND #&3F
+	ORA #&80
+	STA ROMptr+1
+	LDA &152
+	STA ROMptr
+	LDA &150
+	STA temp1
+	LDA &151
+	STA temp1+1
+	RTS
+
+.pseinc	INC temp1
+	BNE *+4
+	INC temp1+1
+	INC ROMptr
+	BNE *+4
+	INC ROMptr+1
+	LDA temp1+1
+	BIT &147
+	BMI *+4
+	LDA ROMptr+1
+	CMP #&C0
+	BNE epsinc
+	INC &146
+	LDA #&80
+	BIT &147
+        BMI psinc2
+	STA ROMptr+1
+	RTS
+.psinc2	STA temp1+1 
+.epsinc	RTS
+
+.gtfnam	JSR gtfn1
+	JSR gtfn2
+	BCC gtfnam+3
+	TYA
+	CLC
+	ADC text
+	STA text
+	BCC *+4
+	INC text+1
+	JSR clspc
+	LDA (text),Y
+	RTS
+
+.gtfn1	CLC
+	ROR &E4
+	LDA text
+	STA &121
+	LDA text+1
+	STA &122
+	LDY #0
+	LDA (text),Y
+	INY
+	CMP #&22
+	BEQ *+4
+	DEY
+	CLC
+	ROR &E4
+	RTS
+
+.gtfn2	LDA (text),Y
+	CMP #&D
+	BNE fnmn0D
+	BIT &E4
+	BMI badstr
+	BPL gtfnok
+.fnmn0D	CMP #&20
+	BCC badstr
+	BNE fnmn20
+	BIT &E4
+	BMI badstr
+	BVC gtfnok
+.fnmn20	CMP #&22
+	BNE fnmn22
+	BIT &E4
+	BPL badstr
+	INY
+	LDA (text),Y
+	CMP #&22
+	BEQ gtfok2
+.gtfnok	TYA
+	CLC
+	ADC text
+	STA text
+	BCC *+4
+	INC text+1
+	JSR clspc
+	SEC
+	RTS
+.fnmn22	CMP #&7C
+	BNE gtfok2
+	INY
+.gtfok2	INY
+	CLC
+	RTS
+
+.badstr	LDX #LO(badst2)
+	LDY #HI(badst2)
+	JMP brk
+.badst2	EQUB &FD
+	EQUS "Bad string"
+	BRK
+
+
+.srldbd	JMP bad
+
+\ SRLOAD - if no bank provided then it loads into SRDATA area
+\ CLI wrapper to OSWORD &42
+.srload	LDA #&C0	\ assume SRDATA load
+	STA &120	\ &120 == command
+	LDA #0
+	STA &12A
+	STA &12B	; NO BUFFER
+	JSR gtfnam
+	CMP #13
+	BEQ srldbd
+	JSR gtpadd	\ Get load address into &124
+	STX &124
+	STY &125
+IF SRDATA
+	CMP #13
+	BEQ srldps
+	CMP #'Q'
+	BEQ srldpq
+ENDIF
+	CMP #' '
+	BNE srldbd
+	JSR rmchos
+	STA &123	\ &123 == bank
+	LDA &120
+	AND #&80	\ Loading into a bank, rather than SRDATA
+	STA &120
+	JSR clspc
+	LDA (text),Y
+	CMP #'Q'
+	BEQ srldpq
+	CMP #13
+	BNE srldbd
+	BEQ srldps
+.srldpq	LDA #131	\ Quick load - loads at OSHWM (default PAGE)
+	JSR OSBYTE
+	STX &128
+	STY &129
+	LDA #132	\ Read default HIMEM
+	JSR OSBYTE
+	TXA
+	SEC
+	SBC &128
+	STA &12A	\ 12A/12B = max buffer size
+	TYA
+	SBC &129
+	STA &12B
+.srldps	LDX #&20	\ OSword &43 to do the load
+	LDY #1
+	JMP osw43b
+
+.srsvbd	JMP bad
+
+\ SRSAVE - Similar logic to SRLOAD but for "Save"
+\ CLI wrapper to OSWORD &43
+.srsave	LDA #&40
+	STA &120	\ Assume saving from SRDATA
+	LDA #0
+	STA &12A
+	STA &12B	; NO BUFFER
+	JSR gtfnam
+	CMP #13
+	BEQ srsvbd
+	JSR gtpadd	\ Get start address
+	STX &124
+	STY &125
+	CMP #13
+	BEQ srsvbd
+	CMP #'+'
+	BEQ *+6
+	CMP #' '
+	BNE srsvbd
+	PHA
+	JSR gtpadd	\ Get end address or length
+	STX &126
+	STY &127
+	TAY
+	PLA
+	CMP #'+'	\ If it's an end address, calculate length
+	BEQ srsvo1
+	LDA &126
+	SEC
+	SBC &124
+	STA &126
+	LDA &127
+	SBC &125
+	STA &127
+.srsvo1	TYA
+IF SRDATA
+	CMP #13
+	BEQ srsvps
+	CMP #'Q'
+	BEQ srsvpq
+ENDIF
+	CMP #' '
+	BNE srsvbd
+	JSR rmchos	\ absolute save from a bank
+	STA &123
+	LDA &120
+	AND #&80
+	STA &120
+	JSR clspc
+	LDA (text),Y
+	CMP #'Q'
+	BEQ srsvpq
+	CMP #13
+	BEQ srsvps
+	JMP srsvbd
+.srsvpq	LDA #131	\ Fast save; work out default PAGE for the buffer
+	JSR OSBYTE
+	STX &128
+	STY &129
+	LDA #132	\ default HIMEM for end of buffer
+	JSR OSBYTE
+	TXA
+	SEC
+	SBC &128
+	STA &12A
+	TYA
+	SBC &129
+	STA &12B
+.srsvps	LDX #&20
+	LDY #1
+	JMP osw43b	\ OSword &43 to do the save
+
+\ Read data file info for the file pointed to by (OSbyteX)
+.rdfdta	LDA OSbyteX
+	PHA
+	LDA OSbyteY
+	PHA
+	LDY #1
+	LDA (OSbyteX),Y
+	STA &2EE
+	INY
+	LDA (OSbyteX),Y
+	STA &2EF
+	LDX #&EE
+	LDY #2
+	LDA #5
+	JSR OSFILE
+	CMP #0
+	BEQ fntfnd
+	PLA
+	STA OSbyteY
+	PLA
+	STA OSbyteX
+	RTS
+
+.fntfnd	LDX #LO(nofile)
+	LDY #HI(nofile)
+	JMP brk
+.nofile	EQUB 214
+	EQUS "File not found"
+	BRK
+
+\ OSWORD 43 - Load/Save from SWRam
+
+.osw43b	STX OSbyteX
+	STY OSbyteY
+.osw43	CLI
+	LDY #0
+	LDA (OSbyteX),Y
+	BMI *+5
+	JMP wd43sv	\ Save requested
+
+	\ This is a load request; get the file details
+	JSR rdfdta
+	LDY #10
+	LDA (OSbyteX),Y
+	INY
+	ORA (OSbyteX),Y
+	BNE *+5
+	JMP w43lds	\ If no buffer mentioned, we're doing a slow load
+	DEY
+	LDA &2F8
+	SEC
+	SBC (OSbyteX),Y
+	INY
+	LDA &2F9
+	SBC (OSbyteX),Y
+	BCS w43lds	\ If the file is too large for free memory, slow load
+	LDY #8		\ Build the OSFILE structure to *LOAD into memory
+	LDA (OSbyteX),Y
+	STA &2F0        
+	INY
+	LDA (OSbyteX),Y
+	STA &2F1
+	LDA #&FF
+	STA &2F2
+	STA &2F3
+	LDA #0
+	STA &2F4
+	LDX #&EE
+	LDY #2
+	LDA OSbyteX
+	PHA
+	LDA OSbyteY
+	PHA
+	LDA #&FF
+	JSR OSFILE	\ LOAD!
+	PLA		\ Now we use OSWORD &42 to move this data into SWR
+	STA OSbyteY
+	PLA
+	STA OSbyteX
+	LDY #0
+	LDA (OSbyteX),Y
+	STA &130
+	LDY #3
+	LDA (OSbyteX),Y
+	STA &137
+	INY
+	LDA (OSbyteX),Y
+	STA &138
+	INY
+	LDA (OSbyteX),Y
+	STA &139
+	LDY #8
+	LDA (OSbyteX),Y
+	STA &131
+	INY
+	LDA (OSbyteX),Y
+	STA &132
+	LDA #&FF
+	STA &133
+	STA &134
+	LDA &2F8
+	STA &135
+	LDA &2F9
+	STA &136
+	LDA #1
+	STA OSbyteY
+	LDA #&30
+	STA OSbyteX
+	JMP osw42	;SRMOVE
+
+\ We get here if the file is too large to fit into free memory
+\ or if the user didn't request to use a buffer
+.w43lds	LDY #0
+	LDA (OSbyteX),Y
+	PHA
+	LDY #3
+	LDA (OSbyteX),Y
+	STA &146
+	INY
+	LDA (OSbyteX),Y
+	STA &152
+	INY
+	LDA (OSbyteX),Y
+	STA &153
+	JSR setwrs
+	PLA
+	\ If we're not SRDATA then should we disable this?
+	\ Eh... let it deal with srdata_status indicating no data banks
+	CMP #&C0
+	BEQ w43ldp	\ Goto w43ldp if loading into SRDATA
+	LDX &2EE
+	LDY &2EF
+	LDA #&40
+	JSR OSFIND	\ OPENIN
+	STA temp5
+	LDA &152
+	STA temp1
+	LDA &153
+	STA temp1+1
+.w43la1	LDY temp5	\ Read the file byte by byte, send to SWR
+	JSR OSBGET
+	BCS w43ela	\ EOF; finish
+	LDY &146
+	JSR SWR_write
+	INC temp1
+	BNE *+4
+	INC temp1+1
+	LDA temp1+1
+	CMP #&C0	\ Abort if we've made if to &C000
+	BNE w43la1
+.w43ela	LDA #0
+	LDY temp5
+	JMP OSFIND	\ Close, exit
+
+	\ This will load data byte by byte from a file into SRDATA
+.w43ldp	LDA &2F8
+	STA &154
+	LDA &2F9
+	STA &155
+	LDA #&FF
+	STA &147
+	JSR tstdat
+	LDX &2EE
+	LDY &2EF
+	LDA #&40
+	JSR OSFIND	\ OPENIN
+	STA temp5
+	JSR pseini
+.w43lp1	LDY temp5
+	JSR OSBGET
+	BCS w43lpe	\ EOF
+	LDY &146
+	JSR SWR_write
+	JSR pseinc
+	JMP w43lp1
+.w43lpe	LDA #0
+	LDY temp5
+	JMP OSFIND	 \ CLOSE
+
+	\ This is a save request
+.wd43sv	LDY #10
+	LDA (OSbyteX),Y
+	INY
+	ORA (OSbyteX),Y
+	BNE *+5
+	JMP w43svs	\ No buffer requested; do it slow
+	LDY #6
+	LDA (OSbyteX),Y
+	LDY #10
+	SEC
+	SBC (OSbyteX),Y
+	LDY #7
+	LDA (OSbyteX),Y
+	LDY #11
+	SBC (OSbyteX),Y
+	BCC *+5
+	JMP w43svs	\ Requested save size too large; do it slow
+
+	LDY #8		\ OK, so we OSWORD &42 to move the data down
+	LDA (OSbyteX),Y	\ to main memory, and then we can SAVE it
+	STA &131
+	INY
+	LDA (OSbyteX),Y
+	STA &132
+	LDA #&FF
+	STA &133
+	STA &134
+	LDY #6
+	LDA (OSbyteX),Y
+	STA &135
+	INY
+	LDA (OSbyteX),Y
+	STA &136
+	LDY #3
+	LDA (OSbyteX),Y
+	STA &137
+	LDY #4
+	LDA (OSbyteX),Y
+	STA &138
+	INY
+	LDA (OSbyteX),Y
+	STA &139
+	LDY #0
+	LDA (OSbyteX),Y
+	STA &130
+	LDA OSbyteX
+	PHA
+	LDA OSbyteY
+	PHA
+	LDA #1
+	STA OSbyteY
+	LDA #&30
+	STA OSbyteX
+	JSR osw42	\ SRMOVE - copies the data down into main memory
+	PLA
+	STA OSbyteY
+	PLA
+	STA OSbyteX
+	LDY #1
+	LDA (OSbyteX),Y
+	STA &2EE
+	INY
+	LDA (OSbyteX),Y
+	STA &2EF
+	LDA #&FF
+	LDY #0
+.w43fsv	STA &2F0,Y
+	INY
+	CPY #8
+	BNE w43fsv
+	STA &2FA
+	STA &2FB
+	STA &2FE
+	STA &2FF
+	LDA (OSbyteX),Y
+	STA &2F8
+	INY
+	LDA (OSbyteX),Y
+	STA &2F9
+	LDY #6
+	LDA (OSbyteX),Y
+	CLC
+	ADC &2F8
+	STA &2FC
+	INY
+	LDA (OSbyteX),Y
+	ADC &2F9
+	STA &2FD
+	LDX #&EE
+	LDY #2
+	LDA #0
+	JMP OSFILE	;*SAVE
+
+	\ This is the slow version of saving
+.w43svs	LDY #0
+	LDA (OSbyteX),Y
+	PHA
+	LDY #3
+	LDA (OSbyteX),Y
+	STA &146
+	INY
+	LDA (OSbyteX),Y
+	STA &152
+	INY
+	LDA (OSbyteX),Y
+	STA &153
+	INY
+	LDA (OSbyteX),Y
+	STA &154
+	INY
+	LDA (OSbyteX),Y
+	STA &155
+	PLA
+	\ If we're not SRDATA then should we disable this?
+	\ Eh... let it deal with srdata_status indicating no data banks
+	CMP #&40
+	BEQ w43svp	\ We need to save from SRDATA
+	LDA &152
+	STA ROMptr
+	LDA &153
+	STA ROMptr+1
+	LDY #1
+	LDA (OSbyteX),Y
+	TAX
+	INY
+	LDA (OSbyteX),Y
+	TAY
+	LDA #&80
+	JSR OSFIND	\ OPENOUT
+	CMP #0
+	BEQ cntopn
+	STA temp5	\ Now we just read byte-by-byte and BPUT it
+.w43sa1	LDY &146
+	JSR OSRDSC
+	LDY temp5
+	JSR OSBPUT
+	INC ROMptr
+	BNE *+4
+	INC ROMptr+1
+	LDA &154
+	SEC
+	SBC #1
+	STA &154
+	LDA &155
+	SBC #0
+	STA &155
+	BNE w43sa1
+	LDA &154
+	BNE w43sa1
+	JMP OSFIND	\ CLOSE
+
+	\ This is the slow version of saving SRDATA
+.w43svp	LDA #0
+	STA &147
+	JSR tstdat
+	JSR pseini
+	LDY #1
+	LDA (OSbyteX),Y
+	TAX
+	INY
+	LDA (OSbyteX),Y
+	TAY
+	LDA #&80
+	JSR OSFIND	\ OPENOUT
+	CMP #0
+	BEQ cntopn
+	STA temp5
+.w43sp1	LDY &146
+	JSR OSRDSC
+	LDY temp5
+	JSR OSBPUT
+	JSR pseinc
+	LDA &154
+	SEC
+	SBC #1
+	STA &154
+	LDA &155
+	SBC #0
+	STA &155
+	BNE w43sp1
+	LDA &154
+	BNE w43sp1
+	LDY temp5
+	JMP OSFIND	\ CLOSE
+
+.cntopn	LDX #LO(ctopn2)
+	LDY #HI(ctopn2)
+	JMP brk
+.ctopn2	EQUB 53
+	EQUS "Can't open file"
+	BRK
+
+IF RAMDISK
+\ Check if the user specified a drive letter
+.gtrmdr	JSR clspc
+	LDA (text),Y
+	CMP #13
+	BEQ rmdrok
+	CMP #&30
+	BCC baddrv
+	CMP #&34
+	BCS baddrv
+.rmdrok	RTS
+.baddrv	LDX #LO(bddrvm)
+	LDY #HI(bddrvm)
+	JMP brk
+.bddrvm	EQUB 205
+	EQUS "Bad drive"
+	BRK
+
+	\ Set up a large RAMDISK
+.rmdlar	LDA status_byte
+	test_bits(status_buffer)
+	BEQ *+5
+	JMP clash		\ Can not have large ramdisk and a buffer
+IF SRDATA
+	LDA srdata_status
+	AND #15
+	BNE *+5
+	JMP clash		\ At least one of banks 4,5,6,7 are in use
+ENDIF
+	LDA #1
+	PHA
+	LDA (text),Y
+	INC text
+	BNE *+4
+	INC text+1
+	CMP #13
+	BEQ forces		\ If no D or A specified, we just force size
+	AND #223
+	CMP #'D'
+	BEQ ramdfs		\ User requested DFS
+	CMP #'A'        
+	BNE crmder
+	JMP ramadf		\ User requested ADFS
+
+.forces	LDA #3		\ Force the RAMdisk size to be set
+	STA ramdisk_present
+	LDA stl_ramdisk
+	AND #3
+	STA stl_ramdisk
+	LDA status_byte
+	clr_bits(status_large_ramdisk)
+	STA status_byte
+	PLA
+	BEQ eforce
+	LDA #status_large_ramdisk
+	ORA status_byte
+	STA status_byte
+.eforce	RTS
+
+	\ Set up a small RAMDISK
+.rmdsma	
+IF SRDATA
+	LDA srdata_status
+	AND #15
+	BNE *+5
+	JMP clash		\ At least one of banks 4,5,6,7 are in use
+ENDIF
+	LDA #0
+	PHA
+	LDA (text),Y
+	INC text
+	BNE *+4
+	INC text+1
+	CMP #13
+	BEQ forces		\ If no D or A specified, we just force size
+	AND #223
+	CMP #'D'
+	BEQ ramdfs		\ User requested DFS
+	CMP #'A'        
+	BNE crmder
+	JMP ramadf		\ User requested ADFS
+
+.crmder	JMP bad
+
+.ramdfs	JSR gtrmdr
+	CMP #13
+	BEQ rmdrof		\ Turn ramdisk off
+	AND #3
+	STA stl_ramdisk		\ Set drive letter
+	LDA #3
+	STA ramdisk_present
+	JSR setwrs
+	LDA #&80		\ Clear the first two sectors
+	STA temp1+1
+	LDA #0
+	STA temp1
+.rmdfsl	JSR wrrom4
+	INC temp1
+	BNE rmdfsl
+	INC temp1+1
+	LDX temp1+1
+	CPX #&82
+	BNE rmdfsl
+	DEC temp1+1
+	LDA #6
+	STA temp1
+	LDA #1
+	JSR wrrom4	\ Set size of disk; &100 sectors
+	PLA
+	BNE rmdfs2
+	JMP setsrm
+.rmdfs2	INC temp1	\ Large disk is &190 sectors
+	LDA #&90
+	JSR wrrom4
+	JMP setlrm
+
+.wrrom4	LDY #4
+	JSR SWR_write
+	RTS
+
+.rmdrof	LDA #0
+	STA ramdisk_present
+	PLA
+	RTS
+
+	\ Creation of an ADFS RAMdisk
+.ramadf	JSR gtrmdr
+	CMP #13
+	BEQ rmdrof		\ Turn ramdisk off
+	AND #3
+	STA stl_ramdisk		\ Save drive letter
+	LDA #3
+	STA ramdisk_present
+	JSR setwrs
+	LDA #&80
+	STA temp1+1
+	LDA #0		\ Clear first 7 sectors
+	STA temp1
+.rmadfl	JSR wrrom4
+	INC temp1
+	BNE rmadfl
+	INC temp1+1
+	LDX temp1+1
+	CPX #&87
+	BNE rmadfl
+	LDA #&80	\ Write out necessary root directory data
+	STA temp1+1
+	LDA #0
+	STA temp1
+	LDA #7
+	JSR wrrom4
+	LDA #&FD
+	STA temp1
+	LDA #1
+	JSR wrrom4
+	INC temp1
+	INC temp1
+	LDA #8
+	JSR wrrom4      
+	INC temp1+1
+	INC temp1
+	LDA #&F9
+	JSR wrrom4
+	LDA #&FE
+	STA temp1
+	LDA #3
+	JSR wrrom4
+	INC temp1
+	LDA #&FC
+	JSR wrrom4
+	LDA #1
+	STA temp1
+	LDA #&82
+	STA temp1+1
+	JSR wrhugo
+	LDA #&86
+	STA temp1+1
+	LDA #&CC
+	STA temp1
+	LDA #&24
+	JSR wrrom4
+	LDA #&D6
+	STA temp1
+	LDA #2
+	JSR wrrom4
+	LDA #&D9
+	STA temp1
+	LDA #&24
+	JSR wrrom4
+	LDA #&FB
+	STA temp1
+	JSR wrhugo
+	PLA
+	BNE *+5
+	JMP setsrm
+	LDA #&80
+	STA temp1+1
+	LDA #&FC
+	STA temp1
+	LDA #&90
+	JSR wrrom4
+	INC temp1
+	INC temp1
+	INC temp1
+	LDA #&98
+	JSR wrrom4
+	INC temp1+1
+	LDA #0
+	STA temp1
+	LDA #&89
+	JSR wrrom4
+	INC temp1
+	LDA #1
+	JSR wrrom4
+	LDA #&FF
+	STA temp1
+	LDA #&8D
+	JSR wrrom4
+	JMP setlrm
+
+.wrhugo	LDA #'H'
+	JSR wrrom4
+	INC temp1
+	LDA #'u'
+	JSR wrrom4
+	INC temp1
+	LDA #'g'
+	JSR wrrom4
+	INC temp1
+	LDA #'o'
+	JSR wrrom4
+	RTS
+
+.setsrm	LDA status_byte
+	clr_bits(status_large_ramdisk)
+	STA status_byte
+	RTS
+
+.setlrm	LDA status_byte
+	clr_bits(status_large_ramdisk)
+	set_bits(status_large_ramdisk)
+	STA status_byte
+	RTS
+
+	\ Change the RAMdisk drive letter
+.ramdrv	JSR gtrmdr
+	CMP #13
+	BEQ normdr
+IF SRDATA
+	PHA
+	LDA srdata_status
+	AND #15
+	BNE *+5
+	JMP clash
+	PLA
+ENDIF
+	SEC
+	SBC #&30
+	STA stl_ramdisk
+	LDA #3
+	STA ramdisk_present
+	RTS
+
+\ Something the Solidisk code needs...
+
+.set385	JSR getcfs
+	CMP #4
+	BNE est385
+	LDA #3
+	STA &10F4
+	LDA #10
+	STA &10EC
+	LDY &CF
+	STA &10ED,Y
+.est385	LDA #&EA
+	LDX #0
+	LDY #&FF
+	JSR OSBYTE
+	TXA
+	AND #&BF
+	STA &385
+	RTS
+
+.normdr	LDA #0
+	STA ramdisk_present
+	RTS
+
+\ Solidisk DDFS and ADFS will call out to OSWORD &78/&79/&7B as necessary
+\ This code pretty much taken from the Solidisk ROM; mangled a little
+.osw78	LDA &CF
+	CMP stl_ramdisk
+	BNE exoswd	\ Check the call is for the drive we're stealing
+	JSR rdsub1
+	JMP rdov1
+
+.osw79	JSR rdsub2
+	JMP rdov1
+
+.exoswd	PLA
+	PLA		; RETURN ADD
+	JMP ermwd2
+
+.osw7B	LDY #&F
+.osw7Bl	LDA &1000,Y
+	STA &38A,Y
+	DEY
+	BPL osw7Bl
+	LDA &390
+	ORA &1117
+	LSR A
+	LSR A
+	LSR A
+	LSR A
+	LSR A
+.rdov1	CMP stl_ramdisk
+	BNE exoswd
+	LDA #0
+	STA ROMptr
+	LDA &38F
+	CMP #8
+	BEQ rdov2
+	CMP #&A
+	BNE exoswd
+.rdov2	LSR A
+	AND #1
+	PHA
+	JSR set385
+	BPL no2ndP
+	LDA &38D
+	AND &38E
+	CMP #&FE
+	BCS no2ndP
+	LDA #&40
+	ORA &385
+	STA &385
+.l2ndp	LDA #&C5
+	JSR &406
+	BCC l2ndp
+
+.no2ndP	JSR rdsub3
+	PLA
+	PHA
+	JSR rdsub4
+	PLA
+	BIT &385
+	BVC rdov3
+	EOR #1
+	LDY #3
+	LDX #&8B
+	JSR &406
+.rdov3	LDX &392
+	LDY &391
+	JSR rdsub5
+	STX temp4
+	STY temp2
+	LDA RAM_ROMSel
+	STA &386
+	LDA &393
+	BEQ rdov4
+	STA &A4
+	LDY #0
+	STY &A3
+	INY
+	STY &A5
+	BNE rdov5
+.rdov4	LDA &395
+	CMP #1
+	STA &A3
+	LDA &396
+	ADC #0
+	STA &A4
+	LDA &397
+	ADC #1
+	STA &A5
+.rdov5	LDA &38B
+	STA &A6
+	LDA &38C
+	STA &A7
+	LDA &A4
+	ORA &A5
+	BEQ rdnotr
+.rdbak1	LDA &A3
+	BEQ rdov6
+	LDA &38F
+	CMP #8
+	BNE rdov6
+	LDA &A4
+	CMP #1
+	BNE rdov6
+	JSR rdsub6
+.rdov6	JSR &D01
+	TYA
+	BNE rdov8
+	INC temp4
+	LDA temp4
+	CMP #&C0
+	BCC rdov7
+	LDA #&80
+	STA temp4
+	INC temp2
+	LDA temp2
+	CMP #8
+	BNE rdov7
+	LDA #12
+	STA temp2
+.rdov7	INC &A7
+	DEC &A4
+	BNE rdbak1
+	DEC &A5
+	BNE rdbak1
+	TYA
+.rdnotr	BEQ rdov9
+.rdov8	ORA #&90
+	STA &38A
+	LDY &387
+	CPY #&79
+	BEQ rdov9
+	LDX #LO(rmderr)
+	LDY #HI(rmderr)
+	JMP brk
+.rmderr	EQUB 52
+	EQUS "Ramdisk error."
+	BRK
+.rdov9	LDA #0
+	STA &38A
+	BIT &385
+	BVC rdov10
+	LDA #&85
+	JSR &406
+	LDA &385
+	AND #&BF
+	STA &385
+.rdov10	JSR rdsub7
+	LDA &387
+	CMP #&79
+	BNE rdov11
+	LDY #&A
+	LDA &38A
+	AND #&1F
+	STA (&B0),Y
+.rdov11	JSR getcfs
+	CMP #4
+	BNE rdov12
+	LDA #0
+	STA &10FE
+	RTS
+.rdov12	LDA #0
+	STA &1000
+	RTS
+
+.rdsub1	LDA #0
+	STA &393
+	STA &398
+	LDY #3
+.rsbl1a	CPY #2
+	BCS rsbo1a
+	LDA &A6,Y
+	BCC rsbo1b
+.rsbo1a	LDA &1072,Y
+.rsbo1b	STA &38B,Y
+	DEY
+	BPL rsbl1a
+	LDA &BA
+	STA &389
+	LDA &BB
+	STA &388
+	JSR rsub2a
+	LDY &A5
+	DEY
+	STY &397
+	LDA &A4
+	STA &396
+	LDA &C2
+	STA &395
+	LDA &A1
+	CMP #&88
+	BEQ rsbo1c
+	CMP #&A0
+	BEQ rsbo1c
+	JSR rsub1a
+	JMP rsbo1d
+.rsbo1c	LSR A
+	LSR A
+	LSR A
+	LSR A
+	STA &38F
+.rsbo1d	LDA &CF
+	STA &390
+	RTS
+
+.rsub1a	AND #&3F
+	CMP #&B
+	BNE rsb1a1
+	LDA #&A
+	BNE rsb1a2
+.rsb1a1	AND #&1B
+	CMP #&13
+	BNE rsb1a3
+	LDA #8
+.rsb1a2	STA &38F
+.rsb1a3	RTS
+
+.rdsub2	LDA OSbyteX
+	STA &B0
+	LDA OSbyteY
+	STA &B1
+	LDY #0
+	STY &38F
+	LDA (&B0),Y
+	BPL *+4
+	LDA &CF
+	STA &390
+.rsbl2a	INY
+	LDA (&B0),Y
+	STA &38A,Y
+	CPY #5
+	BNE rsbl2a
+	LDA (&B0),Y
+	CMP #3
+	BNE rsbo2a
+	INY
+	LDA (&B0),Y
+	JSR rsub1a
+	LDY #9
+	LDA (&B0),Y
+	AND #&1F
+	STA &393
+	DEY
+	LDA (&B0),Y
+	STA &388
+	DEY
+	LDA (&B0),Y
+	STA &389
+	JSR rsub2a
+.rsbo2a	LDA &CF
+	RTS
+
+.rsub2a	LDA #0
+	STA &392
+	STA &391
+.rsb2aa	DEC &389
+	BMI rsb2ab
+	LDA #&A
+	JSR rsub2b
+	JMP rsb2aa
+.rsb2ab	LDA &388
+.rsub2b	CLC
+	ADC &392
+	STA &392
+	BCC *+5
+	INC &391
+	RTS
+
+.rdsub3	JSR rdsub8
+	LDY #&FF
+	JSR rsub7b
+	STY &382
+	RTS
+
+.rdsub7	JSR rdsub8
+	LDY &382
+.rsub7b	LDA #&8F
+	LDX #&C
+	JMP OSBYTE
+
+.rdsub8	JSR getcfs
+	CMP #4
+	BNE *+4
+	PLA
+	PLA
+	RTS
+
+	\ What is the current filesystem?
+.getcfs	LDA #0
+	TAY
+	JMP OSARGS
+
+.rdsub5	LDA temp2
+	PHA
+	STY temp2
+	TXA
+	ASL A
+	ROL temp2
+	ASL A
+	ROL temp2
+	LSR A
+	LSR A
+	ORA #&80
+	TAX
+	LDA temp2
+	CLC
+	ADC #4
+	CMP #8
+	BCC *+4
+	ADC #3
+	TAY
+	PLA
+	STA temp2
+	RTS
+
+.rdsub6	LDY #&10
+.rsub6a	LDA rtne0,Y
+	STA &D1B,Y
+	DEY
+	BPL rsub6a
+	RTS
+
+.rtne0	INY
+	DEC &A3
+	EQUB &D0
+	EQUB &EA
+	LDA &386
+	STA RAM_ROMSel
+	STA ROMsel
+	LDY #0
+	RTS
+
+.rdsub4	TAY
+	LDA &AD
+	PHA
+	LDA rddata,Y
+	STA &AD
+	LDA rddata+2,Y
+	STA &AE
+	LDA rddata+4,Y
+	TAY
+.rsub4a	LDA (&AD),Y
+	STA &D00,Y
+	DEY
+	BPL rsub4a
+	PLA
+	STA &AD
+	RTS
+
+.rddata	EQUB LO(rtne1)
+	EQUB LO(rtne2)
+
+	EQUB HI(rtne1)
+	EQUB HI(rtne2)
+
+	EQUB rtne2-rtne1
+	EQUB ertn2-rtne2
+
+.rtne1	RTI
+	LDY #0
+	LDA temp2
+	STA RAM_ROMSel
+	STA ROMsel
+.rtn1l1	LDA (ROMptr),Y
+	BIT &385
+	BVS rtn1o1
+	STA (&A6),Y
+	BVC rtn1o2
+.rtn1o1	NOP
+	NOP
+	NOP
+	STA &FEE5
+.rtn1o2	INY
+	BNE rtn1l1
+	LDA &386
+	STA RAM_ROMSel
+	STA ROMsel
+	RTS
+
+.rtne2	RTI
+	LDY #0
+	LDA temp2
+	STA RAM_ROMSel
+	STA ROMsel
+.rtn2l1	BIT &385
+	BVS rtn2o1
+	LDA (&A6),Y
+	BVC rtn2o2
+.rtn2o1	NOP
+	NOP
+	NOP
+	LDA &FEE5
+.rtn2o2	STA (ROMptr),Y
+	INY
+	BNE rtn2l1
+	LDA &386
+	STA RAM_ROMSel
+	STA ROMsel
+	RTS
+.ertn2
+
+\ OK, end of Solidisk code!  Don't ask me what it does...
+ENDIF
+
+.clash	LDX #LO(clashe)
+	LDY #HI(clashe)
+	JMP brk
+.clashe	EQUB 54
+	EQUS "RAM usage clash"
+	BRK
+
+IF RAMDISK
+.printr	LDA ramdisk_present
+	CMP #3
+	BNE prntnr
+	LDA stl_ramdisk
+	CMP #8
+	\ Originally this read "BCS clashe" but I think it should be "clash"
+	BCS clash
+.prntnr	JSR clspc
+	LDA (text),Y	\ What buffer do we want?  (default to 3;printer)
+	CMP #&30
+	BCC prnt3
+	CMP #&38
+	BCS prnt3
+	AND #&F
+	JMP prnt3+2
+.prnt3	LDA #3
+	STA buffer_type
+	LDA #0
+	STA ROMTypeTable+12
+	STA ROMTypeTable+13	; KILL C,D
+	LDA status_byte
+	PHA
+	set_bits(status_buffer)
+	STA status_byte
+	PLA
+	test_bits(status_buffer)
+	BEQ *+5
+	JMP eprint
+	JSR printv	\ New buffer
+	JMP purge2
+
+	\ This part of the ROM copied almost completely from
+	\ Solidisk ROM
+
+.printv	LDA #&8D	; LDA
+	STA &880
+	LDA #&AD	; STA
+	STA &884
+	LDA #&60	; RTS
+	STA &883
+	STA &887
+	SEI
+	LDY #&32
+.prntl1	LDA prntcd,Y
+	STA &88B,Y
+	DEY
+	BPL prntl1
+	LDY #1
+.prntl2	LDA &22A,Y
+	STA &8A8,Y
+	LDA &22C,Y
+	STA &8AE,Y
+	LDA &22E,Y
+	STA &8B4,Y
+	DEY
+	BPL prntl2
+	LDA #8
+	STA &22B
+	STA &22D
+	STA &22F
+	LDA #&A4
+	STA &22A
+	LDA #&AA
+	STA &22C
+	LDA #&B0
+	STA &22E
+.eprint	LDA RAM_ROMSel
+	STA &889
+	CLI
+	RTS
+
+.prntcd	PHP
+	CPX buffer_type
+	BEQ *+4
+	PLP
+	RTS
+
+	SEI
+	LDX RAM_ROMSel
+	STX &8BE
+	LDX &889
+	STX RAM_ROMSel
+	STX ROMsel
+	JMP romprt
+	JSR &88B
+	JMP 0
+	JSR &88B
+	JMP 0
+	JSR &88B
+	JMP 0
+	STA RAM_ROMSel
+	STA ROMsel
+	PLA
+	CLI
+	RTS
+
+.romprt
+	STA &88A
+	PLA
+	TAY	; REALLY P
+	PLA
+	TAX
+	PLA
+	TYA
+	ORA #4	; SEI
+	PHA	; REALLY P
+	CPX #&A6
+	BEQ insv
+	CPX #&AC
+	BEQ remv
+	JMP cnpv
+
+.insv	PLP	; LOSE P
+	LDX &881
+	LDY &882
+	JSR incxy
+	CPY &886
+	BNE prtntf
+	CPX &885
+	BEQ prtful
+.prtntf	LDA #ACCCON_buffer
+	STA ACCCON
+	LDA &88A
+	JSR &880
+	STX &881
+	STY &882
+	JSR stFE34
+	CLC
+.ptexit	LDX buffer_type
+	LDA &88A
+	PHA
+	LDA &8BE
+	JMP &8B6
+
+.prtful	LDA #1
+	LDX buffer_type
+	JSR OSEVEN	; FORCE INT
+	SEC
+	BCS ptexit
+
+.remv	LDX &885
+	LDY &886
+	CPY &882
+	BNE ptntem
+	CPX &881
+	BNE ptntem
+	PLP
+	SEC
+	BCS ptexit
+.ptntem	LDA #ACCCON_buffer
+	STA ACCCON
+	JSR &884
+	STA &88A
+	PLP
+	PHP
+	BVS inspv
+	JSR incxy
+	STX &885
+	STY &886
+	CPY &882
+	BNE inspv
+	CPX &881
+	BNE inspv
+
+	LDA #0
+	LDX buffer_type
+	JSR OSEVEN	; FORCE INT
+
+.inspv	LDY &88A
+	JSR stFE34
+	PLP
+	CLC
+	BCC ptexit
+
+.cnpv	PLP
+	BVC *+5
+	JMP ptexit
+	PHP
+	PHP
+	SEC
+	LDA &881
+	SBC &885
+	TAX
+	LDA &882
+	SBC &886
+	BPL *+5
+	CLC
+	ADC #&60
+	TAY
+	PLP
+	BCC cnpvok
+	STX &88A
+	LDA #0
+	SBC &88A
+	TAX
+	STY &88A
+	LDA #&60
+	SBC &88A
+	TAY
+.cnpvok	PLP
+	JMP ptexit+3
+
+.incxy	INX
+	BNE eincxy
+	INY
+	CPY #&80
+	BNE eincxy
+	LDY #&20
+.eincxy	RTS
+
+.printn	LDA status_byte
+	AND #4
+	BEQ nprntn
+	SEI
+	LDY #1
+.nprntl	LDA &8A8,Y
+	STA &22A,Y
+	LDA &8AE,Y
+	STA &22C,Y
+	LDA &8B4,Y
+	STA &22E,Y
+	DEY
+	BPL nprntl
+	LDA status_byte
+	AND #&FB
+	STA status_byte
+	CLI
+.nprntn	RTS
+
+.purge	SEI
+.purge2	LDA #0
+	STA &885
+	STA &881
+	LDA #&20
+	STA &882
+	STA &886
+	RTS
+
+.rstart	LDA buffer_type
+	CMP #3
+	BNE nprstr
+	LDA #2
+	JSR OSWRCH
+	LDA #1
+	JSR OSWRCH
+	LDA #0
+	JSR OSWRCH
+	LDA #3
+	JSR OSWRCH
+.nprstr	RTS
+
+\ I have no idea...  I may have done, back in 1988 though!
+ENDIF
+
+IF SOLIDISK
+\ Does a *LOAD into a RAM bank; probably only works with SOLIDISK DDFS
+.fload	JSR gtfnam
+	CMP #13
+	BEQ floadb
+	JSR gtpadd	\ First address stored at (&123)
+	STX &123
+	STY &124
+	CMP #13
+	BEQ floadb
+	CMP #32
+	BNE floadb
+	LDA #0
+	STA &125
+	STA &126
+	STA &127
+	JSR rmchs2	\ ROM bank is in &125
+	STA &125
+	LDX #&21
+	LDY #1
+	LDA #&FF
+	JMP OSFILE	\ LOAD
+
+.floadb	JMP srldbd
+
+\ Does a *SAVE from a RAM bank; probably only works with SOLIDISK DDFS
+.fsave	JSR gtfnam
+	CMP #13
+	BEQ floadb
+	JSR gtpadd
+	PHA
+	STX &12B
+	STY &12C
+	LDA #&FF
+	LDY #0
+.fsavel	STA &123,Y
+	INY
+	CPY #8
+	BNE fsavel
+	PLA
+	CMP #'+'
+	BEQ *+6
+	CMP #32
+	BNE floadb
+	PHA
+	JSR gtpadd
+	STX &12F
+	STY &130
+	TAY
+	PLA
+	CMP #'+'
+	BNE fsaveo
+	LDA &12F
+	CLC
+	ADC &12B
+	STA &12F
+	LDA &130
+	ADC &12C
+	STA &130
+.fsaveo	LDA #0
+	STA &131
+	STA &132
+	TYA
+	CMP #32
+	BEQ *+5
+	JMP floadb
+	JSR rmchs2
+	STA &12D
+	LDX #&21
+	LDY #1
+	LDA #0
+	JMP OSFILE
+ENDIF
+
+IF	HOSTFS
+	include "hostfs.txt"
+ENDIF
+IF	UPURSFS
+	include "upursfs.txt"
+ENDIF
+
+IF	SRMENU
+.menup
+	INCBIN "MENU"
+ENDIF
+
+SKIPTO	&C000
+.end_code
+SAVE "",start_code,end_code
