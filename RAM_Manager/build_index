@@ -8,6 +8,8 @@ echo "<html>
 <br>
 <a href=manual.txt>The original formatted manual</a>
 <br>
+<a href=https://github.com/sweharris/ROM_Sources>GIT Hub sources</a>
+<br>
 Last modified: $(date)
 <pre>
 "
