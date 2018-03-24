@@ -1,6 +1,10 @@
 The latest version of this code is always at
   http://sweh.spuddy.org/Beeb/UPURSFS/
 
+There is a working GIT repo (which may be ahead of the published version)
+in the "HostFS" directory of
+  https://github.com/sweharris/ROM_Sources
+
 This is what happens when you take the TubeHost concept
   http://sweh.spuddy.org/Beeb/TubeHost/
 and combine it with UPURS
