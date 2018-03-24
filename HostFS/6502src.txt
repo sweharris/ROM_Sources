@@ -2365,30 +2365,11 @@ IF	UPURS
 .idle	LDA	upiob		\ wait for Tx line idle (low)
 	BMI	idle
 
-.sb	LDA	upiob		\ and wait for start bit
+.sb
+FOR	N, 1, 12
+	LDA	upiob		\ and wait for start bit
 	BMI	T0		\ via detection delay list 
-	LDA	upiob
-	BMI	T0
-	LDA	upiob
-	BMI	T0
-	LDA	upiob
-	BMI	T0
-	LDA	upiob
-	BMI	T0
-	LDA	upiob
-	BMI	T0
-	LDA	upiob
-	BMI	T0
-	LDA	upiob
-	BMI	T0
-	LDA	upiob
-	BMI	T0
-	LDA	upiob
-	BMI	T0
-	LDA	upiob
-	BMI	T0
-	LDA	upiob
-	BMI	T0
+NEXT
 
 	LDA	#0		\ if no start bit detected, reset CTS
 	STA	upiob
