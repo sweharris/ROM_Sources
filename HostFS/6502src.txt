@@ -2249,72 +2249,123 @@ IF	UPURS
 	BNE	postrts
 	TAX			\ restore X
 
-.txgo	LDA	#1
-	STA	upiob		\start bit
-	NOP
-	NOP
-	NOP
-        NOP
-        NOP
-	PLA			\load tx data byte into A
-	STA	upiob		\b0
-	NOP
-	NOP
-	NOP
-	NOP
-	LSR A
-	STA	upiob		\b1
-	NOP
-	NOP
-	NOP
-	NOP
-	NOP
-	LSR A
-	STA	upiob		\b2
-	NOP
-	NOP
-	NOP
-	NOP
-	NOP
-	LSR A
-	STA	upiob		\b3
-	NOP
-	NOP
-	NOP
-	NOP
-	LSR A
-	STA	upiob		\b4
-	NOP
-	NOP
-	NOP
-	NOP
-	NOP
-	LSR A
-	STA	upiob		\b5
-	NOP
-	NOP
-	NOP
-	NOP
-	NOP
-	NOP
-	LSR A
-	STA	upiob		\b6
-	NOP
-	NOP
-	NOP
-	NOP
-	LSR A
-	STA	upiob		\b7
-	NOP
-	NOP
-	NOP
-	NOP
-	NOP
-	LDA	#0
-	STA	upiob		\stop bit
+\ This is a rewrite of the core Read/Write routines by hoglet
+\ With luck this might also reduce the dependency on FTDI chips
+\ by improving CTS handling.  But no promises!
+\
+\ dmb: re-wrote this with two aims
+\ 1. avoid asserting bit 6 (CTS)
+\ 2. minimise the error in the placement of the bit transitions
+\
+\ regarding bit jitter, we can place the transitions with 1us accuracy
+\ as everything ends up being synced to the 1MHz clock.
+\
+\ At 115,200 baud the ideal bit duration is 8.68us.
+\
+\    Reference       Original code            New code
+\         time    bit   time error     bit   time error
+\ Start   0.00  10.00   0.00  0.00    9.00   0.00  0.00
+\ Bit 0   8.68   8.00  10.00  1.32    8.00   9.00  0.32
+\ Bit 1  17.36   9.00  18.00  0.64    9.00  17.00  0.36
+\ Bit 2  26.04   9.00  27.00  0.96    9.00  26.00  0.04
+\ Bit 3  34.72   8.00  36.00  1.28    8.00  35.00  0.28
+\ Bit 4  43.40   9.00  44.00  0.60    9.00  43.00  0.40
+\ Bit 5  52.08  10.00  53.00  0.92    9.00  52.00  0.08
+\ Bit 6  60.76   8.00  63.00  2.24    8.00  61.00  0.24
+\ Bit 7  69.44   9.00  71.00  1.56    9.00  69.00  0.44
+\ Stop   78.12         80.00  1.88          78.00  0.12
+\                             ----                 ----
+\                            11.40                 2.28
+
+\ Value to sent is on the stack
+.txgo
+
+        \ Preseve X
+        TXA
+        PHA
+
+        \ Get value to be sent into X
+        TSX
+        LDA     &102,X
+        TAX
+
+        LDA     #1
+        STA     upiob
+        NOP                     \ (2)
+        TXA                     \ (2)
+        ROR     A               \ (2)
+        TAX                     \ (2)   Start bit (9 us)
+        LDA     #0              \ (2)
+        ADC     #0              \ (2)
+        STA     upiob           \ (6)
+
+        TXA                     \ (2)
+        ROR     A               \ (2)
+        TAX                     \ (2)   Bit 0 (8 us)
+        LDA     #0              \ (2)
+        ADC     #0              \ (2)
+        STA     upiob           \ (6)
+
+        NOP                     \ (2)
+        TXA                     \ (2)
+        ROR     A               \ (2)
+        TAX                     \ (2)   Bit 1 (9 us)
+        LDA     #0              \ (2)
+        ADC     #0              \ (2)
+        STA     upiob           \ (6)
+
+        NOP                     \ (2)
+        TXA                     \ (2)
+        ROR     A               \ (2)
+        TAX                     \ (2)   Bit 2 (9 us)
+        LDA     #0              \ (2)
+        ADC     #0              \ (2)
+        STA     upiob           \ (6)
+
+        TXA                     \ (2)
+        ROR     A               \ (2)
+        TAX                     \ (2)   Bit 3 (8 us)
+        LDA     #0              \ (2)
+        ADC     #0              \ (2)
+        STA     upiob           \ (6)
+
+        NOP                     \ (2)
+        TXA                     \ (2)
+        ROR     A               \ (2)
+        TAX                     \ (2)   Bit 4 (9 us)
+        LDA     #0              \ (2)
+        ADC     #0              \ (2)
+        STA     upiob           \ (6)
+
+        NOP                     \ (2)
+        TXA                     \ (2)
+        ROR     A               \ (2)
+        TAX                     \ (2)   Bit 5 (9 us)
+        LDA     #0              \ (2)
+        ADC     #0              \ (2)
+        STA     upiob           \ (6)
+
+        TXA                     \ (2)
+        ROR     A               \ (2)
+        TAX                     \ (2)   Bit 6 (8 us)
+        LDA     #0              \ (2)
+        ADC     #0              \ (2)
+        STA     upiob           \ (6)
+
+        NOP                     \ (2)
+        NOP                     \ (2)
+        NOP                     \ (2)   Bit 7 (9 us)
+        NOP                     \ (2)
+        NOP                     \ (2)
+        LDA     #0              \ (2) 
+        STA     upiob           \ (6) Stop bit
+
 	CLI
-	PLA			\restore A
-	RTS			\return
+        PLA                     \ Restore X                     
+        TAX
+        PLA			\ Discard EOR'd A since we read from stack
+	PLA			\ Restore A
+	RTS			\ Return
 
 .TestRTS
 DEBUG 1
@@ -2371,21 +2422,47 @@ FOR	N, 1, 12
 	BMI	T0		\ via detection delay list 
 NEXT
 
-	LDA	#0		\ if no start bit detected, reset CTS
-	STA	upiob
+\ If no start bit detected drop CTS but continue looking for start bit
+
+\ Using ASL is the faster way to drop CTS while continuing to sample
+\ The alternative, using LDA then STA, would take 2 extra cycles
+\ branching to T1/T2 compensates for additional cycles already consumed
+\ interleaving the ASL/BCS and LDA/BMI reduces the worst case sampling
+\ interval from 6us to 5us. (i.e. 4,6,4,4 becomes 4,5,5,4)
+	ASL	upiob		\ (3 + 7)
+	LDA	upiob		\ (3 + 3)
+	BCS	T2		\ (2) or (3)
+	BMI	T1		\ (2) or (3)
+	LDA	upiob		\ (3 + 3)
+	BMI	T1		\ (2) or (3)
+FOR	N, 1, 10
+	LDA	upiob		\ (3 + 3)
+	BMI	T0		\ (2) or (3)
+NEXT
 	TXA                     \ transfer buffer pointer to A
 	CLI			\ re-enable IRQ
 	RTS                     \ and return 
 
-.T0	CPX	#bufsize	\ to implement n byte buffer, CTS is
-	BCS	xcts		\ turned off after buf top is reached
-	LDA	#$40
-	BNE	wcts
-.xcts	LDA	#0
-	NOP
-.wcts	STA	upiob           \ maintains or drops CTS
+\ To implement n byte buffer, CTS is
+\ turned off after buf top is reached
 
-                                \ sequential bit reads, Y must start at 0
+\ This section is exactly 15 cycles, like the original code,
+\ but only ever drops CTS.
+
+.T0	CPX	#bufsize	\ (2)  (2)
+	BCS	xcts		\ (2)  (3)
+.T1	NOP			\ (2)
+	NOP			\ (2)
+	NOP			\ (2)
+.T2	LDA	#0		\ (2)
+	BEQ	xskip		\ (3)
+.xcts
+	NOP			\      (2)
+	LDA	#0		\      (2)
+	STA	upiob           \      (4 + 2)
+.xskip				\ (15) (15)
+
+                                \ sequential bit reads
 	LDA	upiob           \ bit 0
 	ASL A
 	TYA
@@ -2457,12 +2534,16 @@ NEXT
 	LDA	sbuft		\ any bytes waiting in serial buffer?
 	BNE	gb2		\ yes, continue
 	JSR	getbytes	\ else attempt to fill serial buffer
-	BNE	gb1		\ if bytes returned continue
-	JSR	wait		\ else allow Tx to resume in case paused
+\ These may no longer be needed because of the change in CTS handing
+\ This will speed up any read byte, and since the "write data" loop
+\ also calls this ("have we received a stop-sending message?") it
+\ should also speed up saves.
+\	BNE	gb1		\ if bytes returned continue
+\	JSR	wait		\ else allow Tx to resume in case paused
 ;	JSR	wait
 ;	JSR	wait
 ;	JSR	wait
-	JSR	getbytes	\ second attempt to fill buffer
+\	JSR	getbytes	\ second attempt to fill buffer
 	BEQ	nodata		\ no bytes, assume Tx EOF occurred, exit
 .gb1	LDA	#(LO(serbuf))+1	\ after serial buffer fill, set pointers
 	STA	sbufl
