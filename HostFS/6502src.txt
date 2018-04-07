@@ -2431,8 +2431,8 @@ NEXT
 \ interval from 6us to 5us. (i.e. 4,6,4,4 becomes 4,5,5,4)
 	ASL	upiob		\ (3 + 7)
 	LDA	upiob		\ (3 + 3)
-	BCS	T2		\ (2) or (3)
-	BMI	T1		\ (2) or (3)
+	BCS	T3		\ (2) or (3)
+	BMI	T2		\ (2) or (3)
 	LDA	upiob		\ (3 + 3)
 	BMI	T1		\ (2) or (3)
 FOR	N, 1, 10
@@ -2450,11 +2450,11 @@ NEXT
 \ but only ever drops CTS.
 
 .T0	CPX	#bufsize	\ (2)  (2)
-	BCS	xcts		\ (2)  (3)
-.T1	NOP			\ (2)
+.T1	BCS	xcts		\ (2)  (3)
+.T2	NOP			\ (2)
 	NOP			\ (2)
 	NOP			\ (2)
-.T2	LDA	#0		\ (2)
+.T3	LDA	#0		\ (2)
 	BEQ	xskip		\ (3)
 .xcts
 	NOP			\      (2)
