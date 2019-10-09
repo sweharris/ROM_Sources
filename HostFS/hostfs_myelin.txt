@@ -1,6 +1,6 @@
 DODEBUG = FALSE
 UPURS = FALSE
-MYELIN = FALSE
+MYELIN = TRUE
 SWEH_EXTENSION = FALSE
 SWEH_BREAK = FALSE
 DEFAULT_FS = TRUE
@@ -17,23 +17,24 @@ IF	SWEH_EXTENSION
 ENDIF
 ENDMACRO
 MACRO	VERSION_DATE
-	EQUS "09 Mar 2013"
+	EQUS "Jul 2018"
 ENDMACRO
 MACRO	VERSION_NAME
-	EQUS "HostFS"
+	EQUS "HostFS:Myelin"
 ENDMACRO
 
-\ I/O values, these are suitable for a 6850
-\ =========================================
-TxStatus = &FE08
+\ I/O values, these are suitable for a Myelin serial
+\ ==================================================
+TxStatus = &FCA1
 TxRDY = &2
-TxData = &FE09
+TxData = &FCA0
 TxInit = &13
 RxStop = &55 \  &13=Reset ACIA, &55=8N1, clock/16, RTS high
-RxStatus = &FE08
+RxStatus = &FCA1
 RxRDY = &1
-RxData = &FE09
+RxData = &FCA0
 RxInit = &55
 RxCont = &15 \  &55=RTS high, &15=RTS low
+
 
 include "6502src.txt"

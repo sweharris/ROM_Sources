@@ -133,6 +133,8 @@ ENDIF
         EQUS "(C)"
 IF	UPURS
 	EQUS "Stephen Harris (sweh), with code from MartinB, HostFS core"
+ELIF	MYELIN
+	EQUS "Stephen Harris (sweh), MartinB, JGH, Dossy, for Myelin Serial"
 ELSE
 	EQUS "J.G.Harston"
 ENDIF
@@ -521,7 +523,8 @@ IF	UPURS
 	STA	sbufl
 	LDA	#HI(serbuf)
 	STA	sbufh
-ELSE
+ELIF MYELIN=0
+\ TODO: also not req'd for TCP!
 	LDA #156
 	LDX #RxInit
 	LDY #0
@@ -554,6 +557,8 @@ ENDIF
 .Serv25Table
 IF	UPURS
 	EQUS "UPURSFS "
+ELIF MYELIN
+	EQUS "HOSTFSM "
 ELSE
 	EQUS "HOSTFS  "
 ENDIF
@@ -2594,24 +2599,30 @@ ELSE
 .ReadData
 	PHP
 	SEI
+IF MYELIN=0
 	TYA
 	PHA            \ Speed up by disabling IRQs
 	LDY #RxCont
 	STY RxStatus   \ Lower RTS to allow input
 	LDY #RxStop
+ENDIF
 	LDA RxStatus   \ Get RxStatus
 	AND #RxRDY
 	BNE ReadDataOk  \ Data present
+IF MYELIN=0
 	PLA
 	STY RxStatus
 	TAY
+ENDIF
 	PLP   \ Raise RTS, restore Y,P
 	CLC
 	RTS                    \ CC=No data present
 .ReadDataOk
+IF MYELIN=0
 	PLA
 	STY RxStatus
 	TAY
+ENDIF
 	PLP   \ Raise RTS, restore Y,P
 	LDA RxData
 	CMP #esc
