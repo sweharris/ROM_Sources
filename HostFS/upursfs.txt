@@ -6,7 +6,7 @@ DEFAULT_FS = FALSE
 
 \ Change this if you want to move UPURS to a second user port
 \ (eg connected to the 1Mhz BUS)
-\ http://sweh.spuddy.org/Beeb/2nd_User_Port/
+\ https://sweh.spuddy.org/Beeb/2nd_User_Port/
 USER_PORT = &FE60
 
 BreakKey = &35  \ U

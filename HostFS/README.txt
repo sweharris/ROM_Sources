@@ -1,12 +1,12 @@
 The latest version of this code is always at
-  http://sweh.spuddy.org/Beeb/UPURSFS/
+  https://sweh.spuddy.org/Beeb/UPURSFS/
 
 There is a working GIT repo (which may be ahead of the published version)
 in the "HostFS" directory of
   https://github.com/sweharris/ROM_Sources
 
 This is what happens when you take the TubeHost concept
-  http://sweh.spuddy.org/Beeb/TubeHost/
+  https://sweh.spuddy.org/Beeb/TubeHost/
 and combine it with UPURS
   http://www.retro-kit.co.uk/UPURS/
 
@@ -206,7 +206,7 @@ Good luck!
 0.06 2013/10/20
   Not really a version change but...  allow the UPURS USER_PORT base to
   be changed so it can work with 2nd user port
-    http://sweh.spuddy.org/Beeb/2nd_User_Port/
+    https://sweh.spuddy.org/Beeb/2nd_User_Port/
 
 0.07 2013/11/05
   DEFAULT_FS - if set then this ROM will attempt to select itself as a
