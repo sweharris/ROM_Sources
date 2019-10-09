@@ -213,3 +213,14 @@ Good luck!
     filesystem on BREAK (assuming no higher ROM already done this).
     If clear then BreakKey+BREAK (eg TAB-BREAK or U-BREAK) can still be
     done to select this ROM as a filesystem
+
+0.08 2018/03/24
+  Replace the core UPURS routines with ones optimised by Dave (hoglet),
+  which should speed up SAVE routines a lot by removing delays.  It might
+  (not tested) also let the routines work with non-FTDI adapters.
+
+0.09 2019/10/09
+  Add a configuration to work with a serial adapter created by Phil
+  (myelin), that connects to the 1Mhz bus.  You can read about that
+  card at
+    https://www.stardot.org.uk/forums/viewtopic.php?f=3&t=14033
