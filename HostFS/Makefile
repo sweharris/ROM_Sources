@@ -1,7 +1,15 @@
+all: OBJ/HOSTFS OBJ/UPURSFS OBJ/HOSTFSM
+
 OBJ/UPURSFS: upursfs.txt 6502src.txt compile_date
 	beebasm -i $< -o $@ -v > $@.log.txt
 
-compile_date: upursfs.txt 6502src.txt
+OBJ/HOSTFS: hostfs.txt 6502src.txt compile_date
+	beebasm -i $< -o $@ -v > $@.log.txt
+
+OBJ/HOSTFSM: hostfs_myelin.txt 6502src.txt compile_date
+	beebasm -i $< -o $@ -v > $@.log.txt
+
+compile_date: upursfs.txt 6502src.txt hostfs.txt hostfs_myelin.txt
 	(echo MACRO COMPILE_DATE ; echo "   EQUS \":`date +%Y%m%d-%H%M%S`\"" ; echo ENDMACRO ) > compile_date
 	grep EQUS compile_date
 
@@ -9,12 +17,8 @@ remake: OBJ/UPURSFS
 	rm compile_date
 	make $<
 
-OBJ/HOSTFS: hostfs.txt 6502src.txt
-	beebasm -i $< -o $@ -v > $@.log.txt
 
-all: OBJ/HOSTFS OBJ/UPURSFS
-
-.PHONY : check publish clean
+.PHONY : check publish clean hostfs
 
 clean:
 	/bin/rm -f OBJ/* compile_date
@@ -36,3 +40,8 @@ UPURSFS/UPURSFS.log.txt: OBJ/UPURSFS.log.txt
 
 UPURSFS/README.txt: README.txt
 	cp -a $< $@
+
+hostfs: all
+	cp OBJ/HOSTFS ~/hostfs/roms65
+	cp OBJ/HOSTFSM ~/hostfs/roms65
+	cp OBJ/UPURSFS ~/hostfs/roms65
