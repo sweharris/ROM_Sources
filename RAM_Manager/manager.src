@@ -75,6 +75,7 @@ vdu_status_shadow 	= &10	\ We add this new one, for shadow
 
 
 \ Standard memory locations
+tmpspc          = &DA   \ also &DB
 OSbyteA		= &EF	\ Also OSWORD byte A
 OSbyteX		= &F0	\ Also (XY) vector for OSWORD
 OSbyteY		= &F1
@@ -870,10 +871,10 @@ ENDIF
 	PLA
 	PLA
 	JSR clspc	\ Strip off any spaces following the command
-	JSR clnwcm	\ Call the command the user wanted via (&DA)
+	JSR clnwcm	\ Call the command the user wanted via (tmpspc)
 	LDA #0
 	RTS		\ All done!
-.clnwcm	JMP (&DA)
+.clnwcm	JMP (tmpspc)
 
 .giveup	PLA		\ Not one of my commands
 	TAX
@@ -884,7 +885,7 @@ ENDIF
 
 	\ This routine will compare user input to our command table
 	\ User must enter at least one letter, and the results can
-	\ be abbreviated.  If we get a match then (&DA) points to
+	\ be abbreviated.  If we get a match then (tmpspc) points to
 	\ the requested routine and carry is clear; if no match then
 	\ carry is set
 .cmpcom	LDY #0
@@ -896,8 +897,16 @@ ENDIF
 	BNE diffr2	\ First character doesn't match; next!
 .nxtchr	INY
 	LDA (temp5),Y
-	BMI getadd	\ We've got a high-bit char; complete match!
+	BPL chknxt
+	\ We've got a high-bit char; complete match!
+	\ our current character better be a space or CR
 	LDA (text),Y
+	CMP #' '
+	BEQ getadd
+	CMP #13
+	BEQ getadd
+	BNE diffr3	\ Nope, try next command
+.chknxt	LDA (text),Y
 	EOR (temp5),Y
 	AND #223
 	BEQ nxtchr
@@ -911,16 +920,16 @@ ENDIF
 	BPL fndend
 	INY 
 	LDA (temp5),Y
-	STA &DA
+	STA tmpspc
 	INY 
 	LDA (temp5),Y
-	STA &DB
+	STA tmpspc+1
 	CLC 
 	RTS 
 .diffr2	INY 
 	LDA (temp5),Y
 	BPL diffr2
-	INY 
+.diffr3	INY 
 	INY
 	TYA
 	SEC
@@ -932,10 +941,10 @@ ENDIF
 	JMP cmpcom
 .getadd	INY 
 	LDA (temp5),Y
-	STA &DA
+	STA tmpspc
 	INY 
 	LDA (temp5),Y
-	STA &DB
+	STA tmpspc+1
 	DEY 
 	DEY 
 	TYA 
