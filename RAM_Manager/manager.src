@@ -1,8 +1,36 @@
+\ This code requires beebasm 1.09 or greater to compile
+
+\ Default values.
+SOLIDISK  =? FALSE \\ STL 2M128 board
+SRDATA    =? FALSE \\ Emulate SRDATA
+STLSHADOW =? FALSE \\ Use Solidisk Shadow modes
+
+RAMDISK   =? FALSE \\ STL DDFS compatible RAMDISK driver
+
+SRMENU    =? FALSE \\ Include Solidisk "*SRMENU" code
+
+UPURSFS   =? FALSE \\ Include UPURSFS
+HOSTFS    =? FALSE \\ Include serial HOSTFS
+
+DO_TV     =? FALSE \\ Do a *TV on boot; useful for TVs that need it
+DO_TV_X   =? 255   \\ Default *TV values if DO_TV is true
+DO_TV_Y   =? 1
+
+\ This code was original written for the Solidisk 2M128 board,
+\ which can do a "shadow" mode, do SRDATA, provide buffers and (if used with
+\ a Solidisk DFS ROM) act as a RAM disk.  The SRDATA and RAM disk may also
+\ work with non-Solidisk RAM boards, as long as the right banks
+\ are available
+\
+\ Most of the comments assume the 2M128 board 'cos that's how the code
+\ was originally written, back in the day.
+\
 \ Solidisk 2Mhz 128 board can be configured in multiple ways.  There
 \ are some assumptions built in
 \ banks 4,5,6,7 can be made SRDATA/SRROM
 \ banks C,D can be used for buffers
 \ banks E,F can be used for shadow
+\
 \ If solidisk DDFS is present then we can also use memory for
 \   RAMdisk; a small ramdisk uses 4,5,6,7 (64K).  A large RAMDisk uses
 \   4,5,6,7,C,D,E (100K)

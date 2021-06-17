@@ -29,7 +29,7 @@ upursfs.txt: ../HostFS/upursfs.txt
 hostfs.txt: ../HostFS/hostfs.txt
 	sed -e 's/SWEH_EXTENSION = FALSE/SWEH_EXTENSION = 200/' -e 's/DEFAULT_FS = .*/DEFAULT_FS = FALSE/' -e 's/BreakKey = .*/BreakKey = \&35  \\ U/' < $^ > $@
 
-compile_date: upursfs.txt 6502src.txt
+compile_date: upursfs.txt 6502src.txt manager.src
 	(echo MACRO COMPILE_DATE ; echo "   EQUS \":`date +%Y%m%d-%H%M%S`\"" ; echo ENDMACRO ) > compile_date
 	grep EQUS compile_date
 
