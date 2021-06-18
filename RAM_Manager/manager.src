@@ -1,20 +1,6 @@
 \ This code requires beebasm 1.09 or greater to compile
 
-\ Default values.
-SOLIDISK  =? FALSE \\ STL 2M128 board
-SRDATA    =? FALSE \\ Emulate SRDATA
-STLSHADOW =? FALSE \\ Use Solidisk Shadow modes
-
-RAMDISK   =? FALSE \\ STL DDFS compatible RAMDISK driver
-
-SRMENU    =? FALSE \\ Include Solidisk "*SRMENU" code
-
-UPURSFS   =? FALSE \\ Include UPURSFS
-HOSTFS    =? FALSE \\ Include serial HOSTFS
-
-DO_TV     =? FALSE \\ Do a *TV on boot; useful for TVs that need it
-DO_TV_X   =? 255   \\ Default *TV values if DO_TV is true
-DO_TV_Y   =? 1
+include "defaults"
 
 \ This code was original written for the Solidisk 2M128 board,
 \ which can do a "shadow" mode, do SRDATA, provide buffers and (if used with

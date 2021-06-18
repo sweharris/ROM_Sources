@@ -1,0 +1,16 @@
+\ Default values.
+SOLIDISK  =? FALSE \\ STL 2M128 board
+SRDATA    =? FALSE \\ Emulate SRDATA
+STLSHADOW =? FALSE \\ Use Solidisk Shadow modes
+
+RAMDISK   =? FALSE \\ STL DDFS compatible RAMDISK driver
+
+SRMENU    =? FALSE \\ Include Solidisk "*SRMENU" code
+
+UPURSFS   =? FALSE \\ Include UPURSFS
+HOSTFS    =? FALSE \\ Include serial HOSTFS
+
+DO_TV     =? FALSE \\ Do a *TV on boot; useful for TVs that need it
+DO_TV_X   =? 255   \\ Default *TV values if DO_TV is true
+DO_TV_Y   =? 1
+
