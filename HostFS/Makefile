@@ -1,13 +1,16 @@
-OBJ/UPURSFS: upursfs.txt 6502src.txt compile_date
+OBJ/UPURSFS: upursfs.txt 6502src.txt compile_date default version
 	beebasm -i $< -o $@ -v > $@.log.txt
 
-OBJ/HOSTFS: hostfs.txt 6502src.txt compile_date
+OBJ/HOSTFS: hostfs.txt 6502src.txt compile_date default version
 	beebasm -i $< -o $@ -v > $@.log.txt
 
-OBJ/HOSTFSM: hostfs_myelin.txt 6502src.txt compile_date
+OBJ/HOSTFSM: hostfs_myelin.txt 6502src.txt compile_date default version
 	beebasm -i $< -o $@ -v > $@.log.txt
 
-all: OBJ/HOSTFS OBJ/UPURSFS OBJ/HOSTFSM
+OBJ/UPURSFSE: upursfs_econet.txt upursfs.txt 6502src.txt compile_date default version
+	beebasm -i $< -o $@ -v > $@.log.txt
+
+all: OBJ/HOSTFS OBJ/UPURSFS OBJ/HOSTFSM OBJ/UPURSFSE
 
 compile_date: upursfs.txt 6502src.txt hostfs.txt hostfs_myelin.txt
 	(echo MACRO COMPILE_DATE ; echo "   EQUS \":`date +%Y%m%d-%H%M%S`\"" ; echo ENDMACRO ) > compile_date

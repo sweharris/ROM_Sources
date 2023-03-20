@@ -1,0 +1,75 @@
+\ ====================================================
+\ Functionality
+
+DODEBUG =? FALSE
+UPURS =? FALSE
+MYELIN =? FALSE
+SWEH_EXTENSION =? FALSE
+SWEH_BREAK =? FALSE
+DEFAULT_FS =? FALSE
+USER_PORT_2MHZ =? FALSE
+
+\ ====================================================
+\ Default ports, keys
+
+USER_PORT =? &FE60
+BreakKey =? &60  \ TAB
+
+\ ====================================================
+\ RS port I/O values
+
+\ these are suitable for the built-in 6850
+TxStatus =? &FE08
+TxRDY =? &2
+TxData =? &FE09
+TxInit =? &13
+
+RxStop =? &55 \  &13=Reset ACIA, &55=8N1, clock/16, RTS high
+RxStatus =? &FE08
+RxRDY =? &1
+RxData =? &FE09
+RxInit =? &55
+RxCont =? &15 \  &55=RTS high, &15=RTS low
+
+\ ====================================================
+\ Buffer addresses
+
+\ Let's use these addresses by default for the buffer
+
+\ NMI routines can live from &D00->&D7F.  I know Solidisk DDFS used
+\ to copy code into here, and we are a filesystem, so maybe it's safe
+\ for us as well
+serbuf =? $0D10
+bufsize =? $60   \ allow some overrun space
+
+\ Possible alternative addresses
+\ Would BASIC notice if we stole some of it's work space?
+\ serbuf  = $06E0  \ serial input buffer
+\ bufsize = 28
+
+\ This might work; the serial/tape input buffer.  
+\ serbuf = $0A00
+\ bufsize = 240
+
+\ ====================================================
+
+\ Normally nothing after this would need changing
+
+include "compile_date"
+
+\ These values are for the User Port for UPURS mode
+upiob   = USER_PORT    \ I/O Register B
+upddrb  = USER_PORT+2  \ Data Direction Register B
+upacr   = (USER_PORT AND &FFFE)+&B \ Auxilliary Control Register
+
+\ We're a file system, so we can use memory in &C0 -> &CF
+\ Potentially &B0 -> &BF might be play space  as well
+\ since other parts of HOSTFS use &C0 area...
+; sbuft  = $F5     \ top of buffer pointer 0 (empty) - $FF
+; sbufl  = $F8     \ current buffer drain pointer
+; sbufh  = $F9     \ buffer address hi
+sbuft  = $B5     \ top of buffer pointer 0 (empty) - $FF
+sbufl  = $B8     \ current buffer drain pointer
+sbufh  = $B9     \ buffer address hi
+tempX  = &B0
+tempY  = &B1

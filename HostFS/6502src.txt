@@ -1,9 +1,22 @@
+include "default"
+include "version"
+
 MACRO DEBUG num
 	IF DODEBUG
 	PHA	
 	LDA #num
 	JSR debug1
 	PLA
+	ENDIF
+ENDMACRO
+
+\ LDA and STA accesses to 1MHz Bus peripherals (e.g. the user VIA or most extra
+\ user port addons) take 6 cycles (3 microseconds) due to cycle-stretching.
+\ 2MHz accesses take 4 cycles (2 microseconds). For timing-critical sections,
+\ insert a NOP to keep timing consistent.
+MACRO DELAY_UP2MHZ
+	IF USER_PORT_2MHZ
+		NOP
 	ENDIF
 ENDMACRO
 
@@ -2302,14 +2315,16 @@ IF	UPURS
         TAX                     \ (2)   Start bit (9 us)
         LDA     #0              \ (2)
         ADC     #0              \ (2)
-        STA     upiob           \ (6)
+	DELAY_UP2MHZ		\ (2) delay for 2MHz VIA only
+        STA     upiob           \ (6) (4 for 2MHz VIA)
 
         TXA                     \ (2)
         ROR     A               \ (2)
         TAX                     \ (2)   Bit 0 (8 us)
         LDA     #0              \ (2)
         ADC     #0              \ (2)
-        STA     upiob           \ (6)
+	DELAY_UP2MHZ		\ (2) delay for 2MHz VIA only
+        STA     upiob           \ (6) (4 for 2MHz VIA)
 
         NOP                     \ (2)
         TXA                     \ (2)
@@ -2317,7 +2332,8 @@ IF	UPURS
         TAX                     \ (2)   Bit 1 (9 us)
         LDA     #0              \ (2)
         ADC     #0              \ (2)
-        STA     upiob           \ (6)
+	DELAY_UP2MHZ		\ (2) delay for 2MHz VIA only
+        STA     upiob           \ (6) (4 for 2MHz VIA)
 
         NOP                     \ (2)
         TXA                     \ (2)
@@ -2325,14 +2341,16 @@ IF	UPURS
         TAX                     \ (2)   Bit 2 (9 us)
         LDA     #0              \ (2)
         ADC     #0              \ (2)
-        STA     upiob           \ (6)
+	DELAY_UP2MHZ		\ (2) delay for 2MHz VIA only
+        STA     upiob           \ (6) (4 for 2MHz VIA)
 
         TXA                     \ (2)
         ROR     A               \ (2)
         TAX                     \ (2)   Bit 3 (8 us)
         LDA     #0              \ (2)
         ADC     #0              \ (2)
-        STA     upiob           \ (6)
+	DELAY_UP2MHZ		\ (2) delay for 2MHz VIA only
+        STA     upiob           \ (6) (4 for 2MHz VIA)
 
         NOP                     \ (2)
         TXA                     \ (2)
@@ -2340,7 +2358,8 @@ IF	UPURS
         TAX                     \ (2)   Bit 4 (9 us)
         LDA     #0              \ (2)
         ADC     #0              \ (2)
-        STA     upiob           \ (6)
+	DELAY_UP2MHZ		\ (2) delay for 2MHz VIA only
+        STA     upiob           \ (6) (4 for 2MHz VIA)
 
         NOP                     \ (2)
         TXA                     \ (2)
@@ -2348,14 +2367,16 @@ IF	UPURS
         TAX                     \ (2)   Bit 5 (9 us)
         LDA     #0              \ (2)
         ADC     #0              \ (2)
-        STA     upiob           \ (6)
+	DELAY_UP2MHZ		\ (2) delay for 2MHz VIA only
+        STA     upiob           \ (6) (4 for 2MHz VIA)
 
         TXA                     \ (2)
         ROR     A               \ (2)
         TAX                     \ (2)   Bit 6 (8 us)
         LDA     #0              \ (2)
         ADC     #0              \ (2)
-        STA     upiob           \ (6)
+	DELAY_UP2MHZ		\ (2) delay for 2MHz VIA only
+        STA     upiob           \ (6) (4 for 2MHz VIA)
 
         NOP                     \ (2)
         NOP                     \ (2)
@@ -2363,7 +2384,8 @@ IF	UPURS
         NOP                     \ (2)
         NOP                     \ (2)
         LDA     #0              \ (2) 
-        STA     upiob           \ (6) Stop bit
+	DELAY_UP2MHZ		\ (2) delay for 2MHz VIA only
+        STA     upiob           \ (6) Stop bit (4 for 2MHz VIA)
 
 	CLI
         PLA                     \ Restore X                     
@@ -2464,10 +2486,12 @@ NEXT
 .xcts
 	NOP			\      (2)
 	LDA	#0		\      (2)
+	DELAY_UP2MHZ		\ 2-cycle Delay for 2MHZ VIA
 	STA	upiob           \      (4 + 2)
 .xskip				\ (15) (15)
 
                                 \ sequential bit reads
+	DELAY_UP2MHZ		\ 2-cycle Delay for 2MHZ VIA
 	LDA	upiob           \ bit 0
 	ASL A
 	TYA
@@ -2476,6 +2500,7 @@ NEXT
 	NOP
 
 	TAY			\ bit 1
+	DELAY_UP2MHZ		\ 2-cycle Delay for 2MHZ VIA
 	LDA	upiob
 	ASL A
 	TYA
@@ -2484,6 +2509,7 @@ NEXT
 	NOP
 
 	TAY			\ bit 2
+	DELAY_UP2MHZ		\ 2-cycle Delay for 2MHZ VIA
 	LDA	upiob
 	ASL A
 	TYA
@@ -2491,6 +2517,7 @@ NEXT
 	NOP
 
 	TAY			\ bit 3
+	DELAY_UP2MHZ		\ 2-cycle Delay for 2MHZ VIA
 	LDA	upiob
 	ASL A
 	TYA
@@ -2499,6 +2526,7 @@ NEXT
 	NOP
 
 	TAY			\ bit 4
+	DELAY_UP2MHZ		\ 2-cycle Delay for 2MHZ VIA
 	LDA	upiob
 	ASL A
 	TYA
@@ -2506,6 +2534,7 @@ NEXT
 	NOP
 
 	TAY			\ bit 5
+	DELAY_UP2MHZ		\ 2-cycle Delay for 2MHZ VIA
 	LDA	upiob
 	ASL A
 	TYA
@@ -2514,6 +2543,7 @@ NEXT
 	NOP
 
 	TAY			\ bit 6
+	DELAY_UP2MHZ		\ 2-cycle Delay for 2MHZ VIA
 	LDA	upiob
 	ASL A
 	TYA
@@ -2521,6 +2551,7 @@ NEXT
 	NOP
 
 	TAY			\ bit 7
+	DELAY_UP2MHZ		\ 2-cycle Delay for 2MHZ VIA
 	LDA	upiob
 	ASL A
 	TYA

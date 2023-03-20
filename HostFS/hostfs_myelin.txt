@@ -1,40 +1,15 @@
-DODEBUG = FALSE
-UPURS = FALSE
 MYELIN = TRUE
-SWEH_EXTENSION = FALSE
-SWEH_BREAK = FALSE
 DEFAULT_FS = TRUE
 
-BreakKey = &60  \ TAB
-
-MACRO	VERSION_BYTE
-	EQUB 0
-ENDMACRO
-MACRO	VERSION_STRING
-	EQUS "0.09"
-IF	SWEH_EXTENSION
-	EQUS "s"
-ENDIF
-ENDMACRO
-MACRO	VERSION_DATE
-	EQUS "Oct 2019"
-ENDMACRO
-MACRO	VERSION_NAME
-	EQUS "HostFS:Myelin"
+MACRO	VERSION_NAME_EXT
+	EQUS ":Myelin"
 ENDMACRO
 
-\ I/O values, these are suitable for a Myelin serial
-\ ==================================================
+\ I/O override values, suitable for a Myelin serial
+\ =================================================
 TxStatus = &FCA1
-TxRDY = &2
 TxData = &FCA0
-TxInit = &13
-RxStop = &55 \  &13=Reset ACIA, &55=8N1, clock/16, RTS high
 RxStatus = &FCA1
-RxRDY = &1
 RxData = &FCA0
-RxInit = &55
-RxCont = &15 \  &55=RTS high, &15=RTS low
-
 
 include "6502src.txt"

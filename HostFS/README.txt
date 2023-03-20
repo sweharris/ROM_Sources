@@ -224,3 +224,9 @@ Good luck!
   (myelin), that connects to the 1Mhz bus.  You can read about that
   card at
     https://www.stardot.org.uk/forums/viewtopic.php?f=3&t=14033
+
+0.10 2023/03/15
+  Add ability to work with user ports connected to a 2Mhz bus, such as
+  the Master 128 econet adapter port.  Timings need to be changed.
+  Thanks to rhalkyard on stardot
+    https://github.com/rhalkyard/econet-upurs

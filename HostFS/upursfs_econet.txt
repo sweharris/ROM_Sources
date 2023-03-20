@@ -1,0 +1,9 @@
+\ UPURSFS using a userport connected to the Master econet socket
+\ This works at 2Mhz and doesn't have the 1Mhz slowdown, so we need
+\ to tune the timing loops
+\   https://github.com/rhalkyard/econet-upurs
+
+USER_PORT = &FEA0
+USER_PORT_2MHZ = TRUE
+
+include "upursfs.txt"
